@@ -5,16 +5,24 @@
 
 import { PALETTE } from '../town/palette';
 
+export type Tool = 'build' | 'land' | 'water';
+
 export interface ChromeCallbacks {
   onColor(index: number): void;
   onUndo(): void;
   onRedo(): void;
   onToggleGrid(): void;
+  /** resolves true if the link landed on the clipboard */
+  onShare(): Promise<boolean>;
+  onNew(): void;
+  onScreenshot(): void;
 }
 
 export interface Chrome {
   setColor(index: number): void;
   readonly color: number;
+  setTool(tool: Tool): void;
+  readonly tool: Tool;
 }
 
 export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
@@ -48,6 +56,19 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
       box-shadow: 0 2px 10px rgba(30,50,70,0.15);
     }
     .by-btn:hover { background: rgba(255,255,255,0.8); }
+    .by-tools {
+      position: absolute; left: 50%; bottom: 76px; transform: translateX(-50%);
+      display: flex; gap: 4px; padding: 5px 6px; border-radius: 12px;
+      background: rgba(255,255,255,0.45); backdrop-filter: blur(10px);
+      pointer-events: auto; box-shadow: 0 3px 14px rgba(30,50,70,0.14);
+    }
+    .by-tool {
+      min-width: 34px; height: 30px; border-radius: 8px; border: none;
+      background: transparent; cursor: pointer; font-size: 14px; color: #2c3e50;
+      padding: 0 10px;
+    }
+    .by-tool:hover { background: rgba(255,255,255,0.6); }
+    .by-tool.sel { background: rgba(44,62,80,0.85); color: #fff; }
     .by-hint {
       position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
       color: rgba(40,60,80,0.85); font-size: 14px; pointer-events: none;
@@ -72,6 +93,25 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
   });
   root.appendChild(bar);
 
+  // tool rail: build / raise land / dig water
+  let tool: Tool = 'build';
+  const tools = document.createElement('div');
+  tools.className = 'by-tools';
+  const toolBtns = new Map<Tool, HTMLButtonElement>();
+  const mkTool = (t: Tool, label: string, title: string) => {
+    const b = document.createElement('button');
+    b.className = 'by-tool';
+    b.textContent = label;
+    b.title = title;
+    b.addEventListener('click', () => api.setTool(t));
+    toolBtns.set(t, b);
+    tools.appendChild(b);
+  };
+  mkTool('build', '⌂ build', 'Place blocks (B)');
+  mkTool('land', '▲ land', 'Raise land from water (L)');
+  mkTool('water', '≈ water', 'Dig land down to water (W)');
+  root.appendChild(tools);
+
   const corner = document.createElement('div');
   corner.className = 'by-corner';
   const mkBtn = (label: string, title: string, fn: () => void) => {
@@ -86,6 +126,14 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
   mkBtn('↩', 'Undo (Ctrl+Z)', cb.onUndo);
   mkBtn('↪', 'Redo (Ctrl+Shift+Z)', cb.onRedo);
   mkBtn('#', 'Toggle grid (G)', cb.onToggleGrid);
+  const shareBtn = mkBtn('⛓', 'Copy share link', () => {
+    void cb.onShare().then((copied) => {
+      shareBtn.textContent = copied ? '✓' : '⛓';
+      setTimeout(() => (shareBtn.textContent = '⛓'), 1400);
+    });
+  });
+  mkBtn('📷', 'Save a picture', cb.onScreenshot);
+  mkBtn('✕', 'New town', cb.onNew);
   root.appendChild(corner);
 
   const hint = document.createElement('div');
@@ -109,7 +157,15 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
     get color() {
       return selected;
     },
+    setTool(t: Tool) {
+      tool = t;
+      for (const [tt, b] of toolBtns) b.classList.toggle('sel', tt === t);
+    },
+    get tool() {
+      return tool;
+    },
   };
   api.setColor(0);
+  api.setTool('build');
   return api;
 }

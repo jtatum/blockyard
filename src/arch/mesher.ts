@@ -13,6 +13,8 @@ import { LAND_TOP, levelY, MAX_LEVELS, SEA_FLOOR } from '../core/constants';
 import type { Grid } from '../grid/grid';
 import type { Town } from '../town/town';
 import { GeoSink } from './geom';
+import { emitBunting, emitGardenCell, emitLantern } from './props';
+import { computeRecipes, recipeSignatureCells, type RecipeSet } from './recipes';
 import { computeRoofRegions, emitRoofCell, emitRoofEdges, type RoofRegion } from './roofs';
 import { emitWall } from './walls';
 
@@ -45,6 +47,8 @@ export class ArchMesher {
   private chunkCells = new Map<number, number[]>();
   private chunkMeshes = new Map<number, THREE.Mesh[]>();
   private regions: RoofRegion[] = [];
+  /** current special-build matches; terrainmesh reads gardens from here */
+  recipes: RecipeSet = { lanterns: new Map(), shafts: new Set(), buntings: [], gardens: new Set() };
 
   constructor(town: Town) {
     this.town = town;
@@ -62,6 +66,7 @@ export class ArchMesher {
 
   rebuildAll(): void {
     this.regions = computeRoofRegions(this.town);
+    this.recipes = computeRecipes(this.town);
     for (const key of this.chunkCells.keys()) this.buildChunk(key);
   }
 
@@ -79,6 +84,15 @@ export class ArchMesher {
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
     this.regions = computeRoofRegions(this.town);
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
+
+    // recipes are global pattern matches; rebuild chunks wherever they changed
+    const oldRecipeCells = recipeSignatureCells(this.recipes);
+    this.recipes = computeRecipes(this.town);
+    const newRecipeCells = recipeSignatureCells(this.recipes);
+    for (const c of oldRecipeCells) if (!newRecipeCells.has(c)) affectedCells.add(c);
+    for (const c of newRecipeCells) if (!oldRecipeCells.has(c)) affectedCells.add(c);
+    // any recipe cell near the edit is conservatively refreshed (color changes)
+    for (const c of newRecipeCells) if (expanded.has(c)) affectedCells.add(c);
 
     const chunks = new Set<number>();
     for (const c of affectedCells) chunks.add(this.chunkOfCell[c]!);
@@ -111,14 +125,23 @@ export class ArchMesher {
       if (mask === 0) continue;
       const cell = grid.cells[cellId]!;
 
+      const lantern = this.recipes.lanterns.get(cellId);
+
       for (let level = 0; level < MAX_LEVELS; level++) {
         if (!(mask & (1 << level))) continue;
 
-        // exposed walls
+        // lighthouse lantern replaces the whole top voxel
+        if (lantern && level === lantern.level) {
+          emitLantern(solid, glass, town, lantern);
+          continue;
+        }
+
+        // exposed walls (lighthouse shafts stay blank so stripes read)
+        const blank = this.recipes.shafts.has(cellId + ':' + level);
         for (let k = 0; k < 4; k++) {
           const n = cell.neighbors[k]!;
           if (n >= 0 && town.isFilled(n, level)) continue;
-          emitWall(solid, glass, town, { cell: cellId, level, k });
+          emitWall(solid, glass, town, { cell: cellId, level, k }, blank);
         }
 
         // support: bottom cap + posts when nothing directly below
@@ -154,16 +177,25 @@ export class ArchMesher {
     }
 
     // roofs: surfaces per cell, boundary trim owned by this chunk's cells
+    // (lighthouse cells skip the roof — the lantern caps them)
     const inChunk = (c: number) => this.chunkOfCell[c] === key;
     for (const region of this.regions) {
       let any = false;
       for (const c of region.cells) {
-        if (inChunk(c)) {
+        if (inChunk(c) && !this.recipes.lanterns.has(c)) {
           emitRoofCell(solid, town, region, c);
           any = true;
         }
       }
-      if (any) emitRoofEdges(solid, town, region, inChunk);
+      if (any) emitRoofEdges(solid, town, region, (c) => inChunk(c) && !this.recipes.lanterns.has(c));
+    }
+
+    // special builds owned by this chunk
+    for (const b of this.recipes.buntings) {
+      if (inChunk(b.cellA)) emitBunting(solid, town, b);
+    }
+    for (const g of this.recipes.gardens) {
+      if (inChunk(g)) emitGardenCell(solid, town, g);
     }
 
     const meshes: THREE.Mesh[] = [];

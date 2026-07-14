@@ -107,7 +107,13 @@ function facesWalkable(town: Town, grid: Grid, cell: number, k: number): boolean
   return !town.isFilled(n, 0) && town.isLand(n);
 }
 
-export function emitWall(sink: GeoSink, glass: GeoSink, town: Town, job: WallJob): void {
+export function emitWall(
+  sink: GeoSink,
+  glass: GeoSink,
+  town: Town,
+  job: WallJob,
+  forceBlank = false
+): void {
   const grid = town.grid;
   const c = grid.cells[job.cell]!;
   const a = grid.corner(c, job.k);
@@ -134,7 +140,7 @@ export function emitWall(sink: GeoSink, glass: GeoSink, town: Town, job: WallJob
     openings.push({ kind: 'window', u0: cu - half, u1: cu + half, v0: st.sill, v1: st.sill + st.h, style: st });
   };
 
-  if (w >= 0.6 && !r.chance(0.13)) {
+  if (!forceBlank && w >= 0.6 && !r.chance(0.13)) {
     const isGround = job.level === 0;
     if (isGround && facesWalkable(town, grid, job.cell, job.k) && r.chance(0.45)) {
       const dw = 0.46;

@@ -4,7 +4,7 @@
  */
 
 import * as THREE from 'three';
-import { LAND_TOP, SEA_FLOOR } from '../core/constants';
+import { LAND_TOP, SEA_FLOOR, WATER_Y } from '../core/constants';
 import { hashKey } from '../core/rng';
 import type { Town } from '../town/town';
 
@@ -46,19 +46,33 @@ export function buildTerrainMesh(town: Town): THREE.Mesh {
       ],
       c
     );
-    // coastline skirt where the neighbor is water / world edge
+    // coastline skirt where the neighbor is water / world edge:
+    // dry sand band above the waterline, darker wet stone below (T4 shoreline)
     for (let k = 0; k < 4; k++) {
       const n = cell.neighbors[k]!;
       if (n >= 0 && town.isLand(n)) continue;
       const a = corners[k]!;
       const b = corners[(k + 1) % 4]!;
+      const mid = WATER_Y - 0.06;
       c.copy(SAND).offsetHSL(0, 0, shade * 0.6);
       push(
         [
           { x: a.x, y: LAND_TOP, z: a.y },
           { x: b.x, y: LAND_TOP, z: b.y },
-          { x: b.x, y: SEA_FLOOR, z: b.y },
+          { x: b.x, y: mid, z: b.y },
           { x: a.x, y: LAND_TOP, z: a.y },
+          { x: b.x, y: mid, z: b.y },
+          { x: a.x, y: mid, z: a.y },
+        ],
+        c
+      );
+      c.copy(SAND).offsetHSL(0.02, 0.02, -0.22 + shade * 0.4);
+      push(
+        [
+          { x: a.x, y: mid, z: a.y },
+          { x: b.x, y: mid, z: b.y },
+          { x: b.x, y: SEA_FLOOR, z: b.y },
+          { x: a.x, y: mid, z: a.y },
           { x: b.x, y: SEA_FLOOR, z: b.y },
           { x: a.x, y: SEA_FLOOR, z: a.y },
         ],
