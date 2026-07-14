@@ -8,10 +8,19 @@
  *
  * Night light: rather than swapping to a second directional (which would pop
  * the shadow map), the one sun light is continuous — it eases down to the
- * horizon at dusk, dims, cools, and rises again as faint moonlight. Its
- * elevation never goes negative, so shadows never come from below; "the sun
- * setting" is expressed by nightness dimming sky/ambient while the light's
- * color slides from gold to pale blue.
+ * horizon at dusk, dims, cools, and rises again as moonlight. Its elevation
+ * never goes negative, so shadows never come from below; "the sun setting" is
+ * expressed by nightness dimming sky/ambient while the light's color slides
+ * from gold to pale blue. Night is deliberately video-game bright ("bright
+ * moonlit night"): the hemisphere floor stays >= ~0.6 of day so unlit walls
+ * always read, and only the warm window glow says "night" emphatically.
+ *
+ * Azimuth: `evalSun(t, azimuth)` rotates the whole precomputed sun path
+ * around Y by azimuth * 2π (0..1 = full turn, 0 = the classic east→west
+ * arc), so elevation (time) × azimuth reaches any sky position — including
+ * a sun hanging over the northern horizon. evalDay itself stays
+ * azimuth-free; DayState.sunDir carries the rotated direction, so the sky
+ * dome's sun disc (sky.ts) follows for free.
  */
 
 import * as THREE from 'three';
@@ -50,14 +59,14 @@ const AZIMUTH: Keys = [
   [0.0, 15], [0.25, 55], [0.5, 90], [0.75, 150], [0.85, 175], [1.0, 200],
 ];
 const SUN_INTENSITY: Keys = [
-  [0.0, 1.5], [0.25, 2.4], [0.5, 2.6], [0.75, 2.0], [0.85, 0.6], [0.95, 0.35], [1.0, 0.32],
+  [0.0, 1.5], [0.25, 2.4], [0.5, 2.6], [0.75, 2.0], [0.85, 0.7], [0.95, 1.05], [1.0, 1.1],
 ];
 const AMBIENT_INTENSITY: Keys = [
-  [0.0, 0.7], [0.25, 0.9], [0.5, 0.95], [0.75, 0.72], [0.85, 0.5], [0.95, 0.4], [1.0, 0.38],
+  [0.0, 0.7], [0.25, 0.9], [0.5, 0.95], [0.75, 0.72], [0.85, 0.55], [0.95, 0.6], [1.0, 0.6],
 ];
 const NIGHTNESS: Keys = [[0.0, 0], [0.78, 0], [0.95, 1], [1.0, 1]];
 const EXPOSURE: Keys = [
-  [0.0, 0.98], [0.25, 1.0], [0.5, 1.0], [0.75, 1.06], [0.85, 0.95], [0.95, 0.85], [1.0, 0.84],
+  [0.0, 0.98], [0.25, 1.0], [0.5, 1.0], [0.75, 1.06], [0.85, 0.95], [0.95, 0.92], [1.0, 0.92],
 ];
 
 /** color keyframes as sRGB hex; interpolated in the linear working space */
@@ -67,31 +76,31 @@ const SUN_COLOR: Keys = [
 ];
 const SKY_ZENITH: Keys = [
   [0.0, 0x6f95b8], [0.25, 0x6aa0cd], [0.5, 0x5e9bcc], [0.72, 0x5c82ad],
-  [0.82, 0x33406b], [0.92, 0x101a33], [1.0, 0x0c1428],
+  [0.82, 0x3a476f], [0.92, 0x28356a], [1.0, 0x222e60],
 ];
 const SKY_HORIZON: Keys = [
   [0.0, 0xffd9ae], [0.25, 0xcfe3ee], [0.5, 0xd6e7f0], [0.72, 0xf6c894],
-  [0.8, 0xff9e6a], [0.88, 0x6f5577], [0.95, 0x1e2c48], [1.0, 0x182440],
+  [0.8, 0xff9e6a], [0.88, 0x6f5577], [0.95, 0x3a4c74], [1.0, 0x32446a],
 ];
 const AMBIENT_SKY: Keys = [
   [0.0, 0xd9cdc0], [0.25, 0xcfe5f5], [0.5, 0xd4e9f7], [0.75, 0xe0c3a6],
-  [0.85, 0x51516e], [0.95, 0x25304a], [1.0, 0x222c44],
+  [0.85, 0x5c5f80], [0.95, 0x4e6088], [1.0, 0x4a5c84],
 ];
 const AMBIENT_GROUND: Keys = [
   [0.0, 0x8d8474], [0.25, 0x8b9a7d], [0.5, 0x8e9d80], [0.75, 0x8a7a64],
-  [0.85, 0x3c3a4a], [0.95, 0x181e2c], [1.0, 0x161c28],
+  [0.85, 0x46445c], [0.95, 0x38405a], [1.0, 0x363e58],
 ];
 const FOG_COLOR: Keys = [
   [0.0, 0xecd4b8], [0.25, 0xc9dcea], [0.5, 0xcfe0ec], [0.72, 0xeac9a4],
-  [0.8, 0xe89f74], [0.88, 0x565273], [0.95, 0x1c2840], [1.0, 0x17223a],
+  [0.8, 0xe89f74], [0.88, 0x565273], [0.95, 0x2e3f61], [1.0, 0x283957],
 ];
 const WATER_DEEP: Keys = [
   [0.0, 0x2c5f7e], [0.25, 0x2a6f96], [0.5, 0x28719b], [0.75, 0x2d5878],
-  [0.85, 0x1c2c48], [0.95, 0x0d1a2c], [1.0, 0x0b1728],
+  [0.85, 0x223655], [0.95, 0x1a2c4e], [1.0, 0x172848],
 ];
 const WATER_SHALLOW: Keys = [
   [0.0, 0xd6b79a], [0.25, 0x8ec6d6], [0.5, 0x93cddd], [0.72, 0xd9b184],
-  [0.8, 0xdf9d70], [0.88, 0x4c4a68], [0.95, 0x223450], [1.0, 0x1e304a],
+  [0.8, 0xdf9d70], [0.88, 0x4c4a68], [0.95, 0x32486a], [1.0, 0x2e4462],
 ];
 
 /** locate the keyframe segment containing t; returns [a, b, eased alpha] */
@@ -151,6 +160,20 @@ export function evalDay(t: number): DayState {
   };
 }
 
+const UP = new THREE.Vector3(0, 1, 0);
+
+/**
+ * evalDay plus sun-path rotation: spins sunDir around Y by azimuth * 2π so
+ * the slider's elevation curve can be aimed anywhere on the compass. Pure —
+ * this is the entry the Daylight rig (and tests) use; evalDay stays the
+ * azimuth-free keyframe evaluator.
+ */
+export function evalSun(t: number, azimuth = 0): DayState {
+  const s = evalDay(t);
+  if (azimuth !== 0) s.sunDir.applyAxisAngle(UP, azimuth * Math.PI * 2);
+  return s;
+}
+
 const SUN_DIST = 55;
 const GLASS_DAY = new THREE.Color(0x4a5c6e);
 const GLASS_NIGHT = new THREE.Color(0x1a222c);
@@ -196,8 +219,8 @@ export class Daylight {
     return this._state;
   }
 
-  set(t: number): void {
-    const s = (this._state = evalDay(t));
+  set(t: number, azimuth = 0): void {
+    const s = (this._state = evalSun(t, azimuth));
     this.sun.position.copy(s.sunDir).multiplyScalar(-SUN_DIST);
     this.sun.color.copy(s.sunColor);
     this.sun.intensity = s.sunIntensity;

@@ -3,11 +3,13 @@
  * tech doc §7). One flat byte layout, then optionally deflate + base64url
  * for share codes.
  *
- * Layout (version 1, all multi-byte ints little-endian or LEB128 varint):
- *   [0]      version byte (=1)
+ * Layout (version 2, all multi-byte ints little-endian or LEB128 varint):
+ *   [0]      version byte (=2; version-1 saves still decode — they simply
+ *            lack the sunAzimuth byte, which defaults to 0)
  *   [1..4]   gridSeed uint32 LE — the grid is NOT stored; it regenerates
  *            deterministically from this seed (determinism law)
  *   [5]      timeOfDay quantized to uint8 (0..255)
+ *   [6]      sunAzimuth quantized to uint8 (0..255) — v2 only
  *   varint   cell count n (decode must not assume the caller's grid, so the
  *            arrays are self-describing; the caller validates n afterwards)
  *   n/8 bits terrain, bit=LAND, LSB-first per byte, padding bits zero
@@ -28,7 +30,8 @@ import { MAX_LEVELS } from '../core/constants';
 import { PALETTE } from './palette';
 import { LAND, type Town } from './town';
 
-const VERSION = 1;
+const VERSION = 2;
+const MIN_VERSION = 1;
 /** allocation guard: a corrupt varint must not make us allocate gigabytes */
 const MAX_CELLS = 1 << 20;
 const LEVEL_MASK_LIMIT = 1 << MAX_LEVELS;
@@ -36,6 +39,8 @@ const LEVEL_MASK_LIMIT = 1 << MAX_LEVELS;
 export interface DecodedTown {
   gridSeed: number;
   timeOfDay: number;
+  /** sun-path rotation 0..1 (see daylight.ts evalSun); 0 for v1 saves */
+  sunAzimuth: number;
   /** LAND/WATER per cell, length = cell count */
   terrain: Uint8Array;
   /** level bitmask per cell, length = cell count */
@@ -93,6 +98,9 @@ export function encodeTown(town: Town): Uint8Array {
   out.push(seed & 0xff, (seed >>> 8) & 0xff, (seed >>> 16) & 0xff, (seed >>> 24) & 0xff);
   const t = Math.min(1, Math.max(0, town.timeOfDay));
   out.push(Math.round(t * 255));
+  // `?? 0` guards the integration window where Town predates the field
+  const az = Math.min(1, Math.max(0, town.sunAzimuth ?? 0));
+  out.push(Math.round(az * 255));
 
   const n = town.grid.cells.length;
   pushVarint(out, n);
@@ -137,9 +145,11 @@ export function decodeTown(bytes: Uint8Array): DecodedTown {
   if (checksum !== bytes[bytes.length - 1]) throw badSave();
 
   const r = new Reader(bytes, bytes.length - 1);
-  if (r.byte() !== VERSION) throw badSave();
+  const version = r.byte();
+  if (version < MIN_VERSION || version > VERSION) throw badSave();
   const gridSeed = (r.byte() | (r.byte() << 8) | (r.byte() << 16) | (r.byte() << 24)) >>> 0;
   const timeOfDay = r.byte() / 255;
+  const sunAzimuth = version >= 2 ? r.byte() / 255 : 0;
 
   const n = r.varint();
   if (n > MAX_CELLS) throw badSave();
@@ -181,7 +191,7 @@ export function decodeTown(bytes: Uint8Array): DecodedTown {
     if (pending >= 0 && pending >> 4 !== 0) throw badSave(); // pad nibble must be zero
   }
 
-  return { gridSeed, timeOfDay, terrain, filled, colors };
+  return { gridSeed, timeOfDay, sunAzimuth, terrain, filled, colors };
 }
 
 /**
@@ -202,6 +212,8 @@ export function applySnapshot(town: Town, snap: DecodedTown): void {
   town.filled.set(snap.filled);
   town.colors.set(snap.colors);
   town.timeOfDay = snap.timeOfDay;
+  // guard for the integration window where Town predates the field
+  if ('sunAzimuth' in town) town.sunAzimuth = snap.sunAzimuth;
   town.notify(new Set(town.grid.cells.map((c) => c.id)));
 }
 

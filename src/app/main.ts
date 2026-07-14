@@ -5,7 +5,9 @@ import { History } from '../town/history';
 import { applySnapshot, decodeShareCode, decodeTown, type DecodedTown } from '../town/serialize';
 import { buildGridOverlay } from '../render/griddebug';
 import { buildTerrainMesh } from '../render/terrainmesh';
+import { Critters } from '../render/critters';
 import { HoverHighlight } from '../render/highlight';
+import { PopFX } from '../render/popfx';
 import { SceneShell, webgl2Available } from '../render/scene';
 import { Daylight } from '../render/daylight';
 import { Sky } from '../render/sky';
@@ -66,9 +68,10 @@ async function boot(): Promise<void> {
   }
   const history = new History(town);
 
-  const applyTime = (t: number): void => {
+  const applySun = (t: number, azimuth = town.sunAzimuth): void => {
     town.timeOfDay = t;
-    daylight.set(t);
+    town.sunAzimuth = azimuth;
+    daylight.set(t, azimuth);
     sky.update(daylight.state);
     shell.renderer.toneMappingExposure = daylight.state.exposure;
     shell.renderer.shadowMap.needsUpdate = true; // sun moved
@@ -96,6 +99,23 @@ async function boot(): Promise<void> {
 
   const highlight = new HoverHighlight();
   scene.add(highlight.group);
+
+  // idle life: gulls overhead, sailboats offshore
+  const critters = new Critters(town);
+  scene.add(critters.group);
+  town.onChange((dirty) => {
+    if (dirty.size) critters.refresh();
+  });
+
+  // placement pop feedback (staggered into a wave for bulk placements)
+  const popfx = new PopFX();
+  scene.add(popfx.group);
+  town.onEdits((edits) => {
+    let i = 0;
+    for (const e of edits) {
+      if (e.kind === 'voxel' && e.after !== null) popfx.spawn(grid, e.cell, e.level, i++ * 0.035);
+    }
+  });
 
   const chrome = initChrome(document.getElementById('ui')!, {
     onColor: () => {},
@@ -150,8 +170,8 @@ async function boot(): Promise<void> {
     }, 'image/png');
   }
 
-  initTimeSlider(document.getElementById('ui')!, town.timeOfDay, applyTime);
-  applyTime(town.timeOfDay);
+  initTimeSlider(document.getElementById('ui')!, town.timeOfDay, town.sunAzimuth, applySun);
+  applySun(town.timeOfDay, town.sunAzimuth);
 
   new InputController(canvas, grid, town, history, shell.rig, chrome, highlight);
   window.addEventListener('keydown', (e) => {
@@ -164,11 +184,15 @@ async function boot(): Promise<void> {
   // dev-only introspection for scripted testing (stripped from prod builds)
   if (import.meta.env.DEV) {
     (window as unknown as Record<string, unknown>).__by = {
-      town, history, grid, chrome, mesher, shell, daylight, sky, water, applyTime,
+      town, history, grid, chrome, mesher, shell, daylight, sky, water, applySun,
     };
   }
 
-  shell.onFrame((_dt, time) => water.update(time, daylight.state));
+  shell.onFrame((dt, time) => {
+    water.update(time, daylight.state);
+    critters.update(dt, time);
+    popfx.update(time);
+  });
   shell.start();
 }
 

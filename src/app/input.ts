@@ -26,10 +26,7 @@ const TAP_MS = 450;
 export class InputController {
   private raycaster = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
-  private painting = false;
   private lastPlaced: { cell: number; level: number } | null = null;
-  /** last pointer ground point during a paint stroke, for gap-free drags */
-  private lastPaintPt: { x: number; z: number } | null = null;
   private rightDown: { x: number; y: number; t: number } | null = null;
   /** pending touch tap (deferred until pointerup so drags stay pure orbit) */
   private touchTap: { x: number; y: number; t: number } | null = null;
@@ -105,11 +102,14 @@ export class InputController {
       return;
     }
 
-    this.painting = true;
+    // build/erase/land/water act ONCE per click — bulk edits belong to the
+    // deliberate line/area tools (calm pillar: no runaway drag-painting)
     this.lastPlaced = null;
-    this.lastPaintPt = p ? { x: p.point.x, z: p.point.z } : null;
-    this.history.beginStroke();
-    if (p) this.actAt(tool, p, true);
+    if (p) {
+      this.history.beginStroke();
+      this.actAt(tool, p, true);
+      this.history.endStroke();
+    }
   };
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -123,10 +123,6 @@ export class InputController {
     }
 
     const tool = this.chrome.tool;
-    if (this.painting && p) {
-      this.actAt(tool, p, false);
-    }
-
     // hover ghost
     if (!p) {
       this.highlight.hide();
@@ -172,10 +168,7 @@ export class InputController {
       }
       return;
     }
-    if (e.button === 0 && this.painting) {
-      this.painting = false;
-      this.history.endStroke();
-    } else if (e.button === 2 && this.rightDown) {
+    if (e.button === 2 && this.rightDown) {
       const moved = Math.hypot(e.clientX - this.rightDown.x, e.clientY - this.rightDown.y);
       const dt = performance.now() - this.rightDown.t;
       this.rightDown = null;
@@ -190,39 +183,16 @@ export class InputController {
 
   // -- actions ---------------------------------------------------------------
 
-  /** apply the current tool at a pick; batches everything into one commit */
-  private actAt(tool: string, p: Pick, isFirst: boolean): void {
+  /** apply the current tool once at a pick */
+  private actAt(tool: string, p: Pick, _isFirst: boolean): void {
     const edits: Edit[] = [];
     if (tool === 'build') {
-      if (p.face === 'ground' && !isFirst) {
-        for (const cell of this.strokeCells(p)) {
-          if (!this.town.isFilled(cell, 0)) {
-            edits.push({ kind: 'voxel', cell, level: 0, after: this.chrome.color });
-            this.lastPlaced = { cell, level: 0 };
-          }
-        }
-      }
-      if (p.place) {
-        const lp = this.lastPlaced;
-        if (!lp || lp.cell !== p.place.cell || lp.level !== p.place.level) {
-          edits.push({ kind: 'voxel', cell: p.place.cell, level: p.place.level, after: this.chrome.color });
-          this.lastPlaced = { cell: p.place.cell, level: p.place.level };
-        }
-      }
+      if (p.place) edits.push({ kind: 'voxel', cell: p.place.cell, level: p.place.level, after: this.chrome.color });
     } else if (tool === 'erase') {
-      if (p.remove) {
-        const lp = this.lastPlaced;
-        if (!lp || lp.cell !== p.remove.cell || lp.level !== p.remove.level) {
-          edits.push({ kind: 'voxel', cell: p.remove.cell, level: p.remove.level, after: null });
-          this.lastPlaced = { cell: p.remove.cell, level: p.remove.level };
-        }
-      }
+      if (p.remove) edits.push({ kind: 'voxel', cell: p.remove.cell, level: p.remove.level, after: null });
     } else if (tool === 'land' || tool === 'water') {
       const want = tool === 'land' ? LAND : WATER;
-      const cells = isFirst ? [p.cell] : this.strokeCells(p);
-      for (const cell of cells) {
-        if (this.town.base(cell) !== want) edits.push({ kind: 'terrain', cell, after: want });
-      }
+      if (this.town.base(p.cell) !== want) edits.push({ kind: 'terrain', cell: p.cell, after: want });
     }
     if (edits.length > 0) this.history.commit(edits);
   }
@@ -286,22 +256,6 @@ export class InputController {
       cur = best;
     }
     return path;
-  }
-
-  /** cells crossed since the last paint sample (segment-walk, gap-free drags) */
-  private strokeCells(p: Pick): number[] {
-    const out: number[] = [];
-    const to = { x: p.point.x, z: p.point.z };
-    const from = this.lastPaintPt ?? to;
-    const dist = Math.hypot(to.x - from.x, to.z - from.z);
-    const steps = Math.max(1, Math.ceil(dist / (this.grid.cellSize * 0.35)));
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const cell = this.grid.cellAt(from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t);
-      if (cell >= 0 && out[out.length - 1] !== cell) out.push(cell);
-    }
-    this.lastPaintPt = to;
-    return out;
   }
 
   // -- keyboard ---------------------------------------------------------------

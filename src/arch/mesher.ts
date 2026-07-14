@@ -13,10 +13,12 @@ import { LAND_TOP, levelY, MAX_LEVELS, SEA_FLOOR } from '../core/constants';
 import type { Grid } from '../grid/grid';
 import type { Town } from '../town/town';
 import { GeoSink } from './geom';
+import { emitGroundProps } from './groundprops';
+import { computeOutlines, type Outline } from './outline';
 import { emitBunting, emitGardenCell, emitLantern } from './props';
 import { computeRecipes, recipeSignature, type RecipeSet } from './recipes';
-import { computeRoofRegions, emitRoofCell, emitRoofEdges, type RoofRegion } from './roofs';
-import { emitWall } from './walls';
+import { computeRoofRegions, emitChimney, emitRoofCell, emitRoofEdges, type RoofRegion } from './roofs';
+import { emitWallSegment } from './walls';
 
 const CHUNK = 8; // world units per chunk bin
 const POST_R = 0.06;
@@ -47,6 +49,7 @@ export class ArchMesher {
   private chunkCells = new Map<number, number[]>();
   private chunkMeshes = new Map<number, THREE.Mesh[]>();
   private regions: RoofRegion[] = [];
+  private outlines: Outline[] = [];
   /** current special-build matches; terrainmesh reads gardens from here */
   recipes: RecipeSet = { lanterns: new Map(), shafts: new Set(), buntings: [], gardens: new Set() };
 
@@ -66,15 +69,19 @@ export class ArchMesher {
 
   rebuildAll(): void {
     this.regions = computeRoofRegions(this.town);
+    this.outlines = computeOutlines(this.town);
     this.recipes = computeRecipes(this.town);
     for (const key of this.chunkCells.keys()) this.buildChunk(key);
   }
 
   update(dirty: Set<number>): void {
-    // walls/supports change in the edited cells and their edge neighbors
+    // outline fillets depend on LOOP-adjacent edges, which can belong to
+    // cells that only share a corner — expand over vertex adjacency
     const expanded = new Set(dirty);
     for (const d of dirty) {
-      for (const n of this.grid.cells[d]!.neighbors) if (n >= 0) expanded.add(n);
+      for (const vi of this.grid.cells[d]!.corners) {
+        for (const n of this.grid.vertices[vi]!.cells) expanded.add(n);
+      }
     }
     const touches = (r: RoofRegion) => {
       for (const c of expanded) if (r.cells.has(c)) return true;
@@ -84,6 +91,7 @@ export class ArchMesher {
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
     this.regions = computeRoofRegions(this.town);
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
+    this.outlines = computeOutlines(this.town);
 
     // recipes are global pattern matches; rebuild chunks wherever their
     // per-cell signature changed (appearance, disappearance, OR value change —
@@ -122,7 +130,13 @@ export class ArchMesher {
 
     for (const cellId of cells) {
       const mask = town.filled[cellId]!;
-      if (mask === 0) continue;
+      if (mask === 0) {
+        // ground charm on open land; garden courtyards keep their own dressing
+        if (town.isLand(cellId) && !this.recipes.gardens.has(cellId)) {
+          emitGroundProps(solid, glass, town, cellId);
+        }
+        continue;
+      }
       const cell = grid.cells[cellId]!;
 
       const lantern = this.recipes.lanterns.get(cellId);
@@ -130,18 +144,10 @@ export class ArchMesher {
       for (let level = 0; level < MAX_LEVELS; level++) {
         if (!(mask & (1 << level))) continue;
 
-        // lighthouse lantern replaces the whole top voxel
+        // lighthouse lantern replaces the whole top voxel (walls skipped below)
         if (lantern && level === lantern.level) {
           emitLantern(solid, glass, town, lantern);
           continue;
-        }
-
-        // exposed walls (lighthouse shafts stay blank so stripes read)
-        const blank = this.recipes.shafts.has(cellId + ':' + level);
-        for (let k = 0; k < 4; k++) {
-          const n = cell.neighbors[k]!;
-          if (n >= 0 && town.isFilled(n, level)) continue;
-          emitWall(solid, glass, town, { cell: cellId, level, k }, blank);
         }
 
         // support: bottom cap + posts when nothing directly below
@@ -176,9 +182,22 @@ export class ArchMesher {
       }
     }
 
+    // walls along the smoothed outlines (segments owned by this chunk's cells)
+    const inChunk = (c: number) => this.chunkOfCell[c] === key;
+    for (const outline of this.outlines) {
+      for (const loop of outline.loops) {
+        for (const seg of loop) {
+          if (!inChunk(seg.cell)) continue;
+          const lantern = this.recipes.lanterns.get(seg.cell);
+          if (lantern && lantern.level === outline.level) continue; // lantern replaces walls
+          const blank = this.recipes.shafts.has(seg.cell + ':' + outline.level);
+          emitWallSegment(solid, glass, town, seg, outline.level, blank);
+        }
+      }
+    }
+
     // roofs: surfaces per cell, boundary trim owned by this chunk's cells
     // (lighthouse cells skip the roof — the lantern caps them)
-    const inChunk = (c: number) => this.chunkOfCell[c] === key;
     for (const region of this.regions) {
       let any = false;
       for (const c of region.cells) {
@@ -187,7 +206,10 @@ export class ArchMesher {
           any = true;
         }
       }
-      if (any) emitRoofEdges(solid, town, region, (c) => inChunk(c) && !this.recipes.lanterns.has(c));
+      if (any) {
+        emitRoofEdges(solid, town, region, (c) => inChunk(c) && !this.recipes.lanterns.has(c));
+        emitChimney(solid, town, region, inChunk);
+      }
     }
 
     // special builds owned by this chunk

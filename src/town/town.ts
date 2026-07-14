@@ -46,8 +46,11 @@ export class Town {
   readonly terrain: Uint8Array;
   /** time-of-day 0..1 (0 = dawn, 0.5 = noonish arc peak — see daylight.ts) */
   timeOfDay = 0.35;
+  /** sun-path rotation around Y, 0..1 = full turn (0 = default arc) */
+  sunAzimuth = 0;
 
   private listeners: TownListener[] = [];
+  private editListeners: ((edits: Edit[]) => void)[] = [];
 
   constructor(grid: Grid) {
     this.grid = grid;
@@ -103,6 +106,11 @@ export class Town {
     this.listeners.push(fn);
   }
 
+  /** fires with the edits a fresh user action actually caused (not undo/redo) */
+  onEdits(fn: (edits: Edit[]) => void): void {
+    this.editListeners.push(fn);
+  }
+
   /**
    * Apply edits, fill in `before` fields, notify listeners.
    * Returns the edits that actually changed something (for history).
@@ -134,7 +142,10 @@ export class Town {
         dirty.add(e.cell);
       }
     }
-    if (real.length > 0) this.notify(dirty);
+    if (real.length > 0) {
+      this.notify(dirty);
+      for (const fn of this.editListeners) fn(real);
+    }
     return real;
   }
 

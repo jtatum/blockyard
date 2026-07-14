@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { evalDay, type DayState } from '../src/render/daylight';
+import { evalDay, evalSun, type DayState } from '../src/render/daylight';
 
 const STEPS = 512;
 const samples: DayState[] = [];
@@ -74,13 +74,76 @@ describe('evalDay', () => {
     }
   });
 
-  it('golden hour is warm and low, night light is cool and dim', () => {
+  it('golden hour is warm and low, moonlight is cool and casts real shadows', () => {
     const golden = evalDay(0.78);
     expect(golden.sunColor.r).toBeGreaterThan(golden.sunColor.b); // warm
     expect(-golden.sunDir.y).toBeLessThan(Math.sin((25 * Math.PI) / 180)); // low sun
+    const day = evalDay(0.5);
     const night = evalDay(0.97);
     expect(night.sunColor.b).toBeGreaterThan(night.sunColor.r); // cool
-    expect(night.sunIntensity).toBeLessThan(0.6); // dim but present
-    expect(night.sunIntensity).toBeGreaterThan(0.1);
+    // strong enough for readable shadows, still clearly weaker than the sun
+    expect(night.sunIntensity).toBeGreaterThan(day.sunIntensity * 0.3);
+    expect(night.sunIntensity).toBeLessThan(day.sunIntensity * 0.55);
+  });
+
+  it('night stays readable: ambient, sky, and exposure above the floors', () => {
+    // "bright moonlit night" — unlit walls must read; see daylight.ts header
+    const lum = (c: THREE.Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const day = evalDay(0.5);
+    for (const t of [0.95, 1]) {
+      const night = evalDay(t);
+      expect(night.ambientIntensity).toBeGreaterThanOrEqual(0.5);
+      expect(night.ambientIntensity).toBeGreaterThanOrEqual(day.ambientIntensity * 0.5);
+      // deep-but-readable indigo, not near-black (linear-space luminance)
+      expect(lum(night.skyZenith)).toBeGreaterThan(0.02);
+      expect(lum(night.skyHorizon)).toBeGreaterThan(0.04);
+      expect(night.exposure).toBeGreaterThanOrEqual(0.9);
+    }
+  });
+});
+
+describe('evalSun (azimuth)', () => {
+  it('azimuth 0 (and a full turn) match the classic evalDay path', () => {
+    for (const t of [0, 0.25, 0.5, 0.78, 0.95, 1]) {
+      const base = evalDay(t).sunDir;
+      expect(evalSun(t, 0).sunDir.distanceTo(base)).toBeLessThan(1e-9);
+      expect(evalSun(t, 1).sunDir.distanceTo(base)).toBeLessThan(1e-6);
+    }
+  });
+
+  it('rotates around Y only: elevation and normalization preserved', () => {
+    for (let i = 0; i <= 20; i++) {
+      const t = i / 20;
+      const base = evalDay(t).sunDir;
+      for (const az of [0.1, 0.25, 0.37, 0.5, 0.62, 0.9]) {
+        const dir = evalSun(t, az).sunDir;
+        expect(dir.length()).toBeCloseTo(1, 6);
+        expect(dir.y).toBeCloseTo(base.y, 6);
+      }
+    }
+  });
+
+  it('azimuth 0.25 is a quarter turn, 0.5 mirrors the sun to the far horizon', () => {
+    const base = evalDay(0.5).sunDir;
+    const quarter = evalSun(0.5, 0.25).sunDir;
+    expect(quarter.x).toBeCloseTo(base.z, 6);
+    expect(quarter.z).toBeCloseTo(-base.x, 6);
+    // half a turn negates the horizontal component: the noon sun that sat on
+    // the +Z side of the sky now hangs over the opposite (northern) horizon
+    const half = evalSun(0.5, 0.5).sunDir;
+    expect(half.x).toBeCloseTo(-base.x, 6);
+    expect(half.z).toBeCloseTo(-base.z, 6);
+    expect(Math.sign(-half.z)).toBe(-Math.sign(-base.z));
+  });
+
+  it('azimuth only moves the sun — every other channel is unchanged', () => {
+    const plain = evalDay(0.82);
+    const spun = evalSun(0.82, 0.7);
+    expect(spun.sunIntensity).toBe(plain.sunIntensity);
+    expect(spun.ambientIntensity).toBe(plain.ambientIntensity);
+    expect(spun.nightness).toBe(plain.nightness);
+    expect(spun.exposure).toBe(plain.exposure);
+    expect(spun.sunColor.getHex()).toBe(plain.sunColor.getHex());
+    expect(spun.skyZenith.getHex()).toBe(plain.skyZenith.getHex());
   });
 });
