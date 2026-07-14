@@ -160,7 +160,9 @@ async function boot(): Promise<void> {
 
   // dev-only introspection for scripted testing (stripped from prod builds)
   if (import.meta.env.DEV) {
-    (window as unknown as Record<string, unknown>).__by = { town, history, grid, chrome, mesher };
+    (window as unknown as Record<string, unknown>).__by = {
+      town, history, grid, chrome, mesher, shell, daylight, sky, water, applyTime,
+    };
   }
 
   shell.onFrame((_dt, time) => water.update(time, daylight.state));
