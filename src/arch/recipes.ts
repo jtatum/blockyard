@@ -19,6 +19,7 @@
 
 import type { Grid } from '../grid/grid';
 import type { Town } from '../town/town';
+import { detectStairs, stairsSignature, type StairSpec } from './stairs';
 
 export interface LanternSpec {
   cell: number;
@@ -44,6 +45,8 @@ export interface RecipeSet {
   buntings: BuntingSpec[];
   /** ground cells that are garden courtyard floor */
   gardens: Set<number>;
+  /** alley staircases filling gaps between buildings (spec §8) */
+  stairs: StairSpec[];
 }
 
 const voxKey = (cell: number, level: number) => cell + ':' + level;
@@ -182,10 +185,14 @@ export function computeRecipes(town: Town): RecipeSet {
     shafts: new Set(),
     buntings: [],
     gardens: new Set(),
+    stairs: [],
   };
   detectLighthouses(town, out);
   detectBuntings(town, out);
   detectGardens(town, out);
+  out.stairs = detectStairs(town);
+  // stairs claim their gap cell; a garden never grows through a staircase
+  for (const s of out.stairs) out.gardens.delete(s.cell);
   return out;
 }
 
@@ -204,5 +211,13 @@ export function recipeSignature(r: RecipeSet): Map<number, string> {
     add(b.cellB, s);
   }
   for (const c of r.gardens) add(c, 'G');
+  for (const s of r.stairs) {
+    // register on all cells the spec depends on: lowering a flanking tower
+    // two chunks away must rebuild the gap cell's chunk
+    const ss = stairsSignature(s);
+    add(s.cell, ss);
+    add(s.cellA, ss);
+    add(s.cellB, ss);
+  }
   return sig;
 }

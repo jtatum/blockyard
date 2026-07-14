@@ -13,10 +13,33 @@ export interface P3 { x: number; y: number; z: number }
 export class GeoSink {
   pos: number[] = [];
   col: number[] = [];
+  nrm: number[] = [];
 
   tri(a: P3, b: P3, c: P3, color: THREE.Color): void {
     this.pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
     for (let i = 0; i < 3; i++) this.col.push(color.r, color.g, color.b);
+    // flat face normal (what computeVertexNormals yields for unshared verts)
+    const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+    const vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    nx /= len; ny /= len; nz /= len;
+    for (let i = 0; i < 3; i++) this.nrm.push(nx, ny, nz);
+  }
+
+  /** triangle with explicit per-vertex normals (smooth-shaded curves) */
+  triN(a: P3, b: P3, c: P3, na: P3, nb: P3, nc: P3, color: THREE.Color): void {
+    this.pos.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+    for (let i = 0; i < 3; i++) this.col.push(color.r, color.g, color.b);
+    this.nrm.push(na.x, na.y, na.z, nb.x, nb.y, nb.z, nc.x, nc.y, nc.z);
+  }
+
+  /** quad a-b-c-d with explicit normals per corner */
+  quadN(a: P3, b: P3, c: P3, d: P3, na: P3, nb: P3, nc: P3, nd: P3, color: THREE.Color): void {
+    this.triN(a, b, c, na, nb, nc, color);
+    this.triN(a, c, d, na, nc, nd, color);
   }
 
   /** quad a-b-c-d → tris (a,b,c) (a,c,d); wind so (b-a)×(c-a) faces the viewer */
@@ -66,7 +89,7 @@ export class GeoSink {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
     geo.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
-    geo.computeVertexNormals();
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(this.nrm, 3));
     return geo;
   }
 }

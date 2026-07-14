@@ -366,8 +366,8 @@ describe('totality fuzz gate', () => {
   // They change whenever grid generation, meshing, the palette, or the
   // scripted edit sequence changes — that is the point: any unintended
   // drift in derived geometry or state fails this test.
-  // (regenerated 2026-07-14: curved outlines + roof boundary infill)
-  const GOLDEN_GEOMETRY_HASH = 4088694208;
+  // (regenerated 2026-07-14: arc fillets, smooth normals, midpoint ridges)
+  const GOLDEN_GEOMETRY_HASH = 1381507880;
   const GOLDEN_STATE_HASH = 4068677882;
 
   it('D: scripted build hashes to the golden constants (determinism law)', { timeout: 20_000 }, () => {

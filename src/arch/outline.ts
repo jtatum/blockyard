@@ -28,6 +28,12 @@ export interface OSeg {
   k: number;
   /** true for the straight mid-part of an original edge (window/door host) */
   central: boolean;
+  /** loop-smoothed outward normals at each endpoint (grid coords) — these
+   *  are what make filleted corners SHADE round instead of faceted */
+  nax: number;
+  nay: number;
+  nbx: number;
+  nby: number;
 }
 
 export interface Outline {
@@ -89,13 +95,16 @@ export function walkLoops(
 const CUT_CAP = 0.24;
 const CUT_FRAC = 0.3;
 const SINGLE_FRAC = 0.42;
-/** how far the chamfer midpoint bulges back toward the original corner */
-const BULGE = 0.45;
+/** arc quality: bezier samples per corner (towers rounder than buildings) */
+const ARC_STEPS = 3;
+const SINGLE_ARC_STEPS = 4;
 
 /**
  * Fillet a loop of half-edges into smoothed segments.
  * Each original edge keeps a straight central piece (window host); each
- * corner becomes two short bulged pieces owned by the adjacent edges' cells.
+ * corner becomes a quadratic-bezier arc (control point = the original
+ * corner) sampled into short segments. Loop-smoothed endpoint normals are
+ * attached so curves also SHADE round.
  */
 export function smoothLoop(
   grid: Grid,
@@ -106,6 +115,7 @@ export function smoothLoop(
   const n = loop.length;
   const frac = single ? SINGLE_FRAC : CUT_FRAC;
   const cap = single ? Infinity : CUT_CAP;
+  const steps = single ? SINGLE_ARC_STEPS : ARC_STEPS;
 
   // per edge: endpoints + length
   const pts = loop.map((e) => {
@@ -115,7 +125,7 @@ export function smoothLoop(
     return { ax: a.x, ay: a.y, bx: b.x, by: b.y, len: Math.hypot(b.x - a.x, b.y - a.y), vId: c.corners[(e.k + 1) % 4]! };
   });
 
-  const segs: OSeg[] = [];
+  const raw: Omit<OSeg, 'nax' | 'nay' | 'nbx' | 'nby'>[] = [];
   for (let i = 0; i < n; i++) {
     const cur = pts[i]!;
     const nxt = pts[(i + 1) % n]!;
@@ -123,64 +133,106 @@ export function smoothLoop(
     const eNxt = loop[(i + 1) % n]!;
     // cut distances at the corner between edge i and edge i+1
     const d = Math.min(cap, frac * cur.len, frac * nxt.len);
-    const dPrev = Math.min(
-      cap,
-      frac * cur.len,
-      frac * pts[(i - 1 + n) % n]!.len
-    );
+    const dPrev = Math.min(cap, frac * cur.len, frac * pts[(i - 1 + n) % n]!.len);
     // central straight piece of edge i (from dPrev past a, to d before b)
     const ux = (cur.bx - cur.ax) / cur.len;
     const uy = (cur.by - cur.ay) / cur.len;
     const p0 = { x: cur.ax + ux * dPrev, y: cur.ay + uy * dPrev };
     const p1 = { x: cur.bx - ux * d, y: cur.by - uy * d };
-    segs.push({ ax: p0.x, ay: p0.y, bx: p1.x, by: p1.y, cell: eCur.cell, k: eCur.k, central: true });
+    raw.push({ ax: p0.x, ay: p0.y, bx: p1.x, by: p1.y, cell: eCur.cell, k: eCur.k, central: true });
 
-    // fillet across the corner at V = end of edge i: p1 -> M -> q0
+    // corner arc: quadratic bezier p1 → q0 with the original corner as control
     const vx = cur.bx;
     const vy = cur.by;
     const wx = (nxt.bx - nxt.ax) / nxt.len;
     const wy = (nxt.by - nxt.ay) / nxt.len;
     const q0 = { x: nxt.ax + wx * d, y: nxt.ay + wy * d };
-    const mx = (p1.x + q0.x) / 2 + (vx - (p1.x + q0.x) / 2) * BULGE;
-    const my = (p1.y + q0.y) / 2 + (vy - (p1.y + q0.y) / 2) * BULGE;
-    segs.push({ ax: p1.x, ay: p1.y, bx: mx, by: my, cell: eCur.cell, k: eCur.k, central: false });
-    segs.push({ ax: mx, ay: my, bx: q0.x, by: q0.y, cell: eNxt.cell, k: eNxt.k, central: false });
-    cornerPoint?.set(cur.vId, { x: mx, y: my });
+    const bez = (t: number) => {
+      const s = 1 - t;
+      return {
+        x: s * s * p1.x + 2 * s * t * vx + t * t * q0.x,
+        y: s * s * p1.y + 2 * s * t * vy + t * t * q0.y,
+      };
+    };
+    let prev = { x: p1.x, y: p1.y };
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps;
+      const p = bez(t);
+      const midT = (t + (s - 1) / steps) / 2;
+      raw.push({
+        ax: prev.x, ay: prev.y, bx: p.x, by: p.y,
+        cell: midT < 0.5 ? eCur.cell : eNxt.cell,
+        k: midT < 0.5 ? eCur.k : eNxt.k,
+        central: false,
+      });
+      prev = p;
+    }
+    cornerPoint?.set(cur.vId, bez(0.5));
   }
-  return segs;
+
+  // loop-smoothed endpoint normals: average the outward normals of the two
+  // segments meeting at each point (collinear joins are unaffected)
+  const m = raw.length;
+  const segN = raw.map((s) => {
+    const dx = s.bx - s.ax;
+    const dy = s.by - s.ay;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: dy / len, y: -dx / len }; // outward = right of a→b
+  });
+  return raw.map((s, i) => {
+    const nPrev = segN[(i - 1 + m) % m]!;
+    const nCur = segN[i]!;
+    const nNext = segN[(i + 1) % m]!;
+    let nax = nPrev.x + nCur.x;
+    let nay = nPrev.y + nCur.y;
+    let l = Math.hypot(nax, nay) || 1;
+    nax /= l;
+    nay /= l;
+    let nbx = nCur.x + nNext.x;
+    let nby = nCur.y + nNext.y;
+    l = Math.hypot(nbx, nby) || 1;
+    nbx /= l;
+    nby /= l;
+    return { ...s, nax, nay, nbx, nby };
+  });
 }
 
-/** all smoothed outlines for every level's connected filled regions */
-export function computeOutlines(town: Town): Outline[] {
+/** smoothed outlines for one level's connected filled regions */
+export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
   const grid = town.grid;
   const outlines: Outline[] = [];
-  const assigned = new Set<string>();
+  const assigned = new Set<number>();
 
   for (const start of grid.cells) {
-    for (let level = 0; level < MAX_LEVELS; level++) {
-      if (!town.isFilled(start.id, level)) continue;
-      const key = start.id + ':' + level;
-      if (assigned.has(key)) continue;
-      // flood-fill the region at this level
-      const cells = new Set<number>([start.id]);
-      assigned.add(key);
-      const stack = [start.id];
-      while (stack.length) {
-        const c = grid.cells[stack.pop()!]!;
-        for (const nb of c.neighbors) {
-          if (nb < 0 || cells.has(nb) || !town.isFilled(nb, level)) continue;
-          cells.add(nb);
-          assigned.add(nb + ':' + level);
-          stack.push(nb);
-        }
+    if (!town.isFilled(start.id, level) || assigned.has(start.id)) continue;
+    // flood-fill the region at this level
+    const cells = new Set<number>([start.id]);
+    assigned.add(start.id);
+    const stack = [start.id];
+    while (stack.length) {
+      const c = grid.cells[stack.pop()!]!;
+      for (const nb of c.neighbors) {
+        if (nb < 0 || cells.has(nb) || !town.isFilled(nb, level)) continue;
+        cells.add(nb);
+        assigned.add(nb);
+        stack.push(nb);
       }
-      const single = cells.size === 1;
-      const cornerPoint = new Map<number, { x: number; y: number }>();
-      const loops = walkLoops(grid, (c) => town.isFilled(c, level), cells).map((loop) =>
-        smoothLoop(grid, loop, single, cornerPoint)
-      );
-      outlines.push({ level, cells, loops, single, cornerPoint });
     }
+    const single = cells.size === 1;
+    const cornerPoint = new Map<number, { x: number; y: number }>();
+    const loops = walkLoops(grid, (c) => town.isFilled(c, level), cells).map((loop) =>
+      smoothLoop(grid, loop, single, cornerPoint)
+    );
+    outlines.push({ level, cells, loops, single, cornerPoint });
   }
   return outlines;
+}
+
+/** all levels (full rebuilds and tests; the mesher caches per level) */
+export function computeOutlines(town: Town): Outline[] {
+  const out: Outline[] = [];
+  for (let level = 0; level < MAX_LEVELS; level++) {
+    out.push(...computeOutlinesForLevel(town, level));
+  }
+  return out;
 }

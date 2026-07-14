@@ -35,6 +35,8 @@ export interface RoofRegion {
   cells: Set<number>;
   /** corner-vertex heights (world Y of the roof surface) */
   vertexY: Map<number, number>;
+  /** edge-midpoint heights, keyed 'minVid_maxVid' — these carry the ridges */
+  midY: Map<string, number>;
   /** centroid heights per cell */
   centerY: Map<number, number>;
   /** smoothed boundary loops (shared geometry language with the walls) */
@@ -56,35 +58,40 @@ export function roofKindOf(town: Town, cell: number, level: number): RoofKind {
   return PALETTE[town.colorAt(cell, level)]!.roof;
 }
 
-export function computeRoofRegions(town: Town): RoofRegion[] {
+export function computeRoofRegionsForLevel(town: Town, level: number): RoofRegion[] {
   const grid = town.grid;
   const regions: RoofRegion[] = [];
-  const assigned = new Map<string, number>();
+  const assigned = new Set<number>();
 
   for (const start of grid.cells) {
-    for (let level = 0; level < MAX_LEVELS; level++) {
-      if (!isTopExposed(town, start.id, level)) continue;
-      const key = start.id + ':' + level;
-      if (assigned.has(key)) continue;
-      const kind = roofKindOf(town, start.id, level);
-      const cells = new Set<number>([start.id]);
-      assigned.set(key, regions.length);
-      const stack = [start.id];
-      while (stack.length) {
-        const c = grid.cells[stack.pop()!]!;
-        for (const n of c.neighbors) {
-          if (n < 0 || cells.has(n)) continue;
-          if (!isTopExposed(town, n, level)) continue;
-          if (roofKindOf(town, n, level) !== kind) continue;
-          cells.add(n);
-          assigned.set(n + ':' + level, regions.length);
-          stack.push(n);
-        }
+    if (!isTopExposed(town, start.id, level) || assigned.has(start.id)) continue;
+    const kind = roofKindOf(town, start.id, level);
+    const cells = new Set<number>([start.id]);
+    assigned.add(start.id);
+    const stack = [start.id];
+    while (stack.length) {
+      const c = grid.cells[stack.pop()!]!;
+      for (const n of c.neighbors) {
+        if (n < 0 || cells.has(n)) continue;
+        if (!isTopExposed(town, n, level)) continue;
+        if (roofKindOf(town, n, level) !== kind) continue;
+        cells.add(n);
+        assigned.add(n);
+        stack.push(n);
       }
-      regions.push(buildRegion(town, regions.length, level, kind, cells));
     }
+    regions.push(buildRegion(town, regions.length, level, kind, cells));
   }
   return regions;
+}
+
+/** all levels (full rebuilds and tests; the mesher caches per level) */
+export function computeRoofRegions(town: Town): RoofRegion[] {
+  const out: RoofRegion[] = [];
+  for (let level = 0; level < MAX_LEVELS; level++) {
+    out.push(...computeRoofRegionsForLevel(town, level));
+  }
+  return out;
 }
 
 function buildRegion(
@@ -105,71 +112,106 @@ function buildRegion(
     cone = grid.cells[only]!.neighbors.every((n) => n < 0 || !town.isFilled(n, level));
   }
 
-  // boundary vertices for the heightfield
-  const boundaryVerts = new Set<number>();
-  for (const ci of cells) {
-    const c = grid.cells[ci]!;
-    for (let k = 0; k < 4; k++) {
-      const n = c.neighbors[k]!;
-      if (n >= 0 && cells.has(n)) continue;
-      boundaryVerts.add(c.corners[k]!);
-      boundaryVerts.add(c.corners[(k + 1) % 4]!);
-    }
-  }
+  // multi-source Dijkstra over corners + EDGE MIDPOINTS + centroids.
+  // Midpoints are what let ridges run continuously along rows of cells —
+  // without them every cell peaks alone and long roofs read as sawtooth.
+  const midKey = (a: number, b: number) => (a < b ? a + '_' + b : b + '_' + a);
+  const dist = new Map<string, number>();
+  const vertexY = new Map<number, number>();
+  const midY = new Map<string, number>();
+  const centerY = new Map<number, number>();
 
-  // multi-source Dijkstra over corner graph (edges of region cells)
-  const dist = new Map<number, number>();
   if (kind === 'pitched' && !cone) {
-    const adj = new Map<number, { v: number; w: number }[]>();
-    const link = (a: number, b: number) => {
-      const va = grid.vertices[a]!;
-      const vb = grid.vertices[b]!;
-      const w = Math.hypot(va.x - vb.x, va.y - vb.y);
+    const adj = new Map<string, { v: string; w: number }[]>();
+    const link = (a: string, b: string, w: number) => {
       let arr = adj.get(a);
       if (!arr) adj.set(a, (arr = []));
       arr.push({ v: b, w });
+      let brr = adj.get(b);
+      if (!brr) adj.set(b, (brr = []));
+      brr.push({ v: a, w });
     };
+    const seeds: string[] = [];
     for (const ci of cells) {
       const c = grid.cells[ci]!;
       for (let k = 0; k < 4; k++) {
-        link(c.corners[k]!, c.corners[(k + 1) % 4]!);
-        link(c.corners[(k + 1) % 4]!, c.corners[k]!);
+        const aId = c.corners[k]!;
+        const bId = c.corners[(k + 1) % 4]!;
+        const va = grid.vertices[aId]!;
+        const vb = grid.vertices[bId]!;
+        const mx = (va.x + vb.x) / 2;
+        const my = (va.y + vb.y) / 2;
+        const half = Math.hypot(vb.x - va.x, vb.y - va.y) / 2;
+        const mk = 'm' + midKey(aId, bId);
+        link('v' + aId, mk, half);
+        link('v' + bId, mk, half);
+        link('c' + ci, mk, Math.hypot(c.cx - mx, c.cy - my));
+        link('c' + ci, 'v' + aId, Math.hypot(c.cx - va.x, c.cy - va.y));
+        const n = c.neighbors[k]!;
+        if (n < 0 || !cells.has(n)) {
+          seeds.push('v' + aId, 'v' + bId, mk);
+        }
       }
     }
-    const pq: { v: number; d: number }[] = [];
-    for (const v of boundaryVerts) {
-      dist.set(v, 0);
-      pq.push({ v, d: 0 });
+    // binary min-heap — the midpoint graph tripled node counts, and an
+    // array-scan queue turned dense-town re-solves quadratic
+    const heapV: string[] = [];
+    const heapD: number[] = [];
+    const push = (v: string, d: number) => {
+      let i = heapV.length;
+      heapV.push(v);
+      heapD.push(d);
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (heapD[p]! <= heapD[i]!) break;
+        [heapD[p], heapD[i]] = [heapD[i]!, heapD[p]!];
+        [heapV[p], heapV[i]] = [heapV[i]!, heapV[p]!];
+        i = p;
+      }
+    };
+    const pop = (): { v: string; d: number } => {
+      const top = { v: heapV[0]!, d: heapD[0]! };
+      const lv = heapV.pop()!;
+      const ld = heapD.pop()!;
+      if (heapV.length > 0) {
+        heapV[0] = lv;
+        heapD[0] = ld;
+        let i = 0;
+        for (;;) {
+          const l = i * 2 + 1;
+          const r = l + 1;
+          let s = i;
+          if (l < heapD.length && heapD[l]! < heapD[s]!) s = l;
+          if (r < heapD.length && heapD[r]! < heapD[s]!) s = r;
+          if (s === i) break;
+          [heapD[s], heapD[i]] = [heapD[i]!, heapD[s]!];
+          [heapV[s], heapV[i]] = [heapV[i]!, heapV[s]!];
+          i = s;
+        }
+      }
+      return top;
+    };
+    for (const s of seeds) {
+      if (dist.get(s) === 0) continue;
+      dist.set(s, 0);
+      push(s, 0);
     }
-    while (pq.length) {
-      let bi = 0;
-      for (let i = 1; i < pq.length; i++) if (pq[i]!.d < pq[bi]!.d) bi = i;
-      const { v, d } = pq.splice(bi, 1)[0]!;
+    while (heapV.length > 0) {
+      const { v, d } = pop();
       if (d > (dist.get(v) ?? Infinity)) continue;
       for (const e of adj.get(v) ?? []) {
         const nd = d + e.w;
         if (nd < (dist.get(e.v) ?? Infinity)) {
           dist.set(e.v, nd);
-          pq.push({ v: e.v, d: nd });
+          push(e.v, nd);
         }
       }
     }
-  }
-
-  const roofY = (d: number) => baseY + Math.min(d * SLOPE, MAX_RISE);
-  const vertexY = new Map<number, number>();
-  const centerY = new Map<number, number>();
-  if (kind === 'pitched' && !cone) {
-    for (const [v, d] of dist) vertexY.set(v, roofY(d));
-    for (const ci of cells) {
-      const c = grid.cells[ci]!;
-      let cd = Infinity;
-      for (const vi of c.corners) {
-        const v = grid.vertices[vi]!;
-        const d = (dist.get(vi) ?? 0) + Math.hypot(v.x - c.cx, v.y - c.cy);
-        cd = Math.min(cd, d);
-      }
-      centerY.set(ci, roofY(cd));
+    const roofY = (d: number) => baseY + Math.min(d * SLOPE, MAX_RISE);
+    for (const [node, d] of dist) {
+      if (node.startsWith('v')) vertexY.set(Number(node.slice(1)), roofY(d));
+      else if (node.startsWith('m')) midY.set(node.slice(1), roofY(d));
+      else centerY.set(Number(node.slice(1)), roofY(d));
     }
   }
 
@@ -183,7 +225,7 @@ function buildRegion(
     for (const s of loop) if (s.central) centralSeg.set(s.cell + ':' + s.k, s);
   }
 
-  return { id, level, kind, cells, vertexY, centerY, loops, cornerPoint, centralSeg, cone };
+  return { id, level, kind, cells, vertexY, midY, centerY, loops, cornerPoint, centralSeg, cone };
 }
 
 const cTmp = new THREE.Color();
@@ -218,17 +260,27 @@ export function emitRoofCell(sink: GeoSink, town: Town, region: RoofRegion, cell
     return;
   }
 
-  // pitched: triangle fan around the centroid using the region heightfield
+  // pitched: 8-triangle fan through edge midpoints — midpoint heights carry
+  // ridgelines across cell boundaries (Townscaper's diamond-facet roofs)
   const cy = region.centerY.get(cellId) ?? baseY;
   const center = { x: c.cx, y: cy, z: c.cy };
   for (let k = 0; k < 4; k++) {
     const aId = c.corners[k]!;
     const bId = c.corners[(k + 1) % 4]!;
+    const va = grid.vertices[aId]!;
+    const vb = grid.vertices[bId]!;
+    const mKey = aId < bId ? aId + '_' + bId : bId + '_' + aId;
     const aPos = cornerPos(region, grid, aId);
     const bPos = cornerPos(region, grid, bId);
     const pa = { x: aPos.x, y: region.vertexY.get(aId) ?? baseY, z: aPos.y };
     const pb = { x: bPos.x, y: region.vertexY.get(bId) ?? baseY, z: bPos.y };
-    sink.tri(pa, center, pb, cTmp);
+    const pm = {
+      x: (va.x + vb.x) / 2,
+      y: region.midY.get(mKey) ?? baseY,
+      z: (va.y + vb.y) / 2,
+    };
+    sink.tri(pa, center, pm, cTmp);
+    sink.tri(pm, center, pb, cTmp);
   }
   emitBoundaryInfill(sink, town, region, cellId, baseY);
 }
@@ -276,11 +328,22 @@ function emitConeRoof(sink: GeoSink, town: Town, region: RoofRegion): void {
   cTmp2.copy(cTmp).offsetHSL(0, 0, -0.06);
 
   const r = rng(grid.seed, 'cone', cellId);
-  const apex: P3 = { x: c.cx, y: baseY + r.range(0.55, 0.75), z: c.cy };
+  const coneH = r.range(0.55, 0.75);
+  const apex: P3 = { x: c.cx, y: baseY + 0.06 + coneH, z: c.cy };
 
-  // ring points from the loop (each segment start)
+  // ring points from the loop (each segment start), smooth radial shading
   const ring = loop.map((s) => ({ x: s.ax, y: s.ay }));
   const n = ring.length;
+  const coneNormal = (p: { x: number; y: number }): P3 => {
+    const o = outward(p, c);
+    const rad = Math.hypot(p.x - c.cx, p.y - c.cy) || 1;
+    // right-cone surface normal: h·radial + r·up, normalized
+    const nx = o.x * coneH;
+    const nz = o.y * coneH;
+    const ny = rad;
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    return { x: nx / len, y: ny / len, z: nz / len };
+  };
   for (let i = 0; i < n; i++) {
     const a = ring[i]!;
     const b = ring[(i + 1) % n]!;
@@ -293,7 +356,10 @@ function emitConeRoof(sink: GeoSink, town: Town, region: RoofRegion): void {
     const B2: P3 = { x: b.x + ob.x * OVERHANG * 0.8, y: baseY - 0.04, z: b.y + ob.y * OVERHANG * 0.8 };
     sink.quad(A, B, B2, A2, cTmp);
     sink.quad(A, A2, B2, B, cTmp2); // underside
-    sink.tri(A, apex, B, cTmp);
+    const na = coneNormal(a);
+    const nb = coneNormal(b);
+    const nApex = { x: (na.x + nb.x) / 2, y: (na.y + nb.y) / 2, z: (na.z + nb.z) / 2 };
+    sink.triN(A, apex, B, na, nApex, nb, cTmp);
   }
 }
 

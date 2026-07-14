@@ -14,10 +14,11 @@ import type { Grid } from '../grid/grid';
 import type { Town } from '../town/town';
 import { GeoSink } from './geom';
 import { emitGroundProps } from './groundprops';
-import { computeOutlines, type Outline } from './outline';
+import { computeOutlinesForLevel, type Outline } from './outline';
 import { emitBunting, emitGardenCell, emitLantern } from './props';
 import { computeRecipes, recipeSignature, type RecipeSet } from './recipes';
-import { computeRoofRegions, emitChimney, emitRoofCell, emitRoofEdges, type RoofRegion } from './roofs';
+import { computeRoofRegionsForLevel, emitChimney, emitRoofCell, emitRoofEdges, type RoofRegion } from './roofs';
+import { emitStairs } from './stairs';
 import { emitWallSegment } from './walls';
 
 const CHUNK = 8; // world units per chunk bin
@@ -50,12 +51,27 @@ export class ArchMesher {
   private chunkMeshes = new Map<number, THREE.Mesh[]>();
   private regions: RoofRegion[] = [];
   private outlines: Outline[] = [];
+  /** per-level caches — an edit at level L only invalidates outlines at L and
+   *  regions at L-1/L, so re-solves stay O(affected levels), not O(town) */
+  private levelOutlines: Outline[][] = [];
+  private levelRegions: RoofRegion[][] = [];
+  /** state snapshots for diffing which levels an update actually touched */
+  private prevFilled: Uint32Array;
+  private prevColors: Uint8Array;
   /** current special-build matches; terrainmesh reads gardens from here */
-  recipes: RecipeSet = { lanterns: new Map(), shafts: new Set(), buntings: [], gardens: new Set() };
+  recipes: RecipeSet = {
+    lanterns: new Map(),
+    shafts: new Set(),
+    buntings: [],
+    gardens: new Set(),
+    stairs: [],
+  };
 
   constructor(town: Town) {
     this.town = town;
     this.grid = town.grid;
+    this.prevFilled = new Uint32Array(town.filled.length);
+    this.prevColors = new Uint8Array(town.colors.length);
     this.chunkOfCell = new Int32Array(this.grid.cells.length);
     for (const c of this.grid.cells) {
       const key = (Math.floor((c.cx + 200) / CHUNK) << 8) | Math.floor((c.cy + 200) / CHUNK);
@@ -68,10 +84,51 @@ export class ArchMesher {
   }
 
   rebuildAll(): void {
-    this.regions = computeRoofRegions(this.town);
-    this.outlines = computeOutlines(this.town);
+    for (let l = 0; l < MAX_LEVELS; l++) {
+      this.levelRegions[l] = computeRoofRegionsForLevel(this.town, l);
+      this.levelOutlines[l] = computeOutlinesForLevel(this.town, l);
+    }
+    this.flattenLevelCaches();
+    this.prevFilled.set(this.town.filled);
+    this.prevColors.set(this.town.colors);
     this.recipes = computeRecipes(this.town);
     for (const key of this.chunkCells.keys()) this.buildChunk(key);
+  }
+
+  private flattenLevelCaches(): void {
+    this.regions = this.levelRegions.flat();
+    this.outlines = this.levelOutlines.flat();
+  }
+
+  /** diff snapshots against current state → levels needing recompute */
+  private refreshDirtyLevels(dirty: Set<number>): void {
+    const town = this.town;
+    const outlineLevels = new Set<number>();
+    const regionLevels = new Set<number>();
+    for (const c of dirty) {
+      const now = town.filled[c]!;
+      const diff = (this.prevFilled[c]! ^ now) >>> 0;
+      for (let l = 0; l < MAX_LEVELS; l++) {
+        const bit = 1 << l;
+        if (diff & bit) {
+          outlineLevels.add(l);
+          regionLevels.add(l);
+          if (l > 0) regionLevels.add(l - 1); // exposure of the level below
+        } else if (now & bit) {
+          // occupied both before and after: roof kind changes with color
+          if (this.prevColors[c * MAX_LEVELS + l] !== town.colors[c * MAX_LEVELS + l]) {
+            regionLevels.add(l);
+          }
+        }
+      }
+      this.prevFilled[c] = now;
+      for (let l = 0; l < MAX_LEVELS; l++) {
+        this.prevColors[c * MAX_LEVELS + l] = town.colors[c * MAX_LEVELS + l]!;
+      }
+    }
+    for (const l of outlineLevels) this.levelOutlines[l] = computeOutlinesForLevel(town, l);
+    for (const l of regionLevels) this.levelRegions[l] = computeRoofRegionsForLevel(town, l);
+    if (outlineLevels.size || regionLevels.size) this.flattenLevelCaches();
   }
 
   update(dirty: Set<number>): void {
@@ -89,9 +146,8 @@ export class ArchMesher {
     };
     const affectedCells = new Set<number>(expanded);
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
-    this.regions = computeRoofRegions(this.town);
+    this.refreshDirtyLevels(dirty);
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
-    this.outlines = computeOutlines(this.town);
 
     // recipes are global pattern matches; rebuild chunks wherever their
     // per-cell signature changed (appearance, disappearance, OR value change —
@@ -131,8 +187,12 @@ export class ArchMesher {
     for (const cellId of cells) {
       const mask = town.filled[cellId]!;
       if (mask === 0) {
-        // ground charm on open land; garden courtyards keep their own dressing
-        if (town.isLand(cellId) && !this.recipes.gardens.has(cellId)) {
+        // ground charm on open land; gardens and staircases dress themselves
+        if (
+          town.isLand(cellId) &&
+          !this.recipes.gardens.has(cellId) &&
+          !this.recipes.stairs.some((s) => s.cell === cellId)
+        ) {
           emitGroundProps(solid, glass, town, cellId);
         }
         continue;
@@ -218,6 +278,9 @@ export class ArchMesher {
     }
     for (const g of this.recipes.gardens) {
       if (inChunk(g)) emitGardenCell(solid, town, g);
+    }
+    for (const s of this.recipes.stairs) {
+      if (inChunk(s.cell)) emitStairs(solid, town, s);
     }
 
     const meshes: THREE.Mesh[] = [];

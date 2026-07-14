@@ -144,6 +144,22 @@ export function emitWallSegment(
   const grid = town.grid;
   const f = new WallFrame(seg.ax, seg.ay, seg.bx, seg.by, levelY(level), levelY(level + 1));
   if (f.width < 1e-4) return;
+  const w0 = f.width;
+
+  // smooth-shaded wall rect: normals interpolate between the segment's
+  // loop-smoothed endpoint normals, so filleted corners read round
+  const nAt = (u: number): { x: number; y: number; z: number } => {
+    const t = Math.max(0, Math.min(1, u / w0));
+    let nx = seg.nax + (seg.nbx - seg.nax) * t;
+    let nz = seg.nay + (seg.nby - seg.nay) * t;
+    const len = Math.hypot(nx, nz) || 1;
+    return { x: nx / len, y: 0, z: nz / len };
+  };
+  const smoothRect = (u0: number, v0: number, u1: number, v1: number, d: number, color: THREE.Color): void => {
+    const na = nAt(u0);
+    const nb = nAt(u1);
+    sink.quadN(f.p(u0, v0, d), f.p(u0, v1, d), f.p(u1, v1, d), f.p(u1, v0, d), na, na, nb, nb, color);
+  };
 
   const entry = PALETTE[town.colorAt(seg.cell, level)]!;
   wallColor.setHex(entry.hex);
@@ -157,7 +173,7 @@ export function emitWallSegment(
   const vBase = plinth ? PLINTH_H : 0;
   if (plinth) {
     plinthColor.setHex(entry.hex).offsetHSL(0.01, -0.12, -0.09);
-    f.rect(sink, 0, 0, w, PLINTH_H, -0.02, plinthColor);
+    smoothRect(0, 0, w, PLINTH_H, -0.02, plinthColor);
     // small ledge where plinth meets wall
     f.box(sink, 0, PLINTH_H, w, PLINTH_H + 0.025, 0.02, plinthColor);
   }
@@ -195,12 +211,12 @@ export function emitWallSegment(
   let uPrev = 0;
   for (const o of openings) {
     const oBase = o.kind === 'door' ? 0 : vBase;
-    if (o.u0 > uPrev) f.rect(sink, uPrev, vBase, o.u0, H, 0, wallColor);
-    if (o.v0 > oBase) f.rect(sink, o.u0, vBase, o.u1, o.v0, 0, wallColor);
-    if (o.v1 < H) f.rect(sink, o.u0, o.v1, o.u1, H, 0, wallColor);
+    if (o.u0 > uPrev) smoothRect(uPrev, vBase, o.u0, H, 0, wallColor);
+    if (o.v0 > oBase) smoothRect(o.u0, vBase, o.u1, o.v0, 0, wallColor);
+    if (o.v1 < H) smoothRect(o.u0, o.v1, o.u1, H, 0, wallColor);
     uPrev = o.u1;
   }
-  if (uPrev < w) f.rect(sink, uPrev, vBase, w, H, 0, wallColor);
+  if (uPrev < w) smoothRect(uPrev, vBase, w, H, 0, wallColor);
 
   // timber cross-bracing on blank-ish central faces
   if (entry.timber && seg.central && openings.length === 0 && w > 0.5 && !forceBlank) {
