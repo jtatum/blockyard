@@ -366,8 +366,8 @@ describe('totality fuzz gate', () => {
   // They change whenever grid generation, meshing, the palette, or the
   // scripted edit sequence changes — that is the point: any unintended
   // drift in derived geometry or state fails this test.
-  // (regenerated 2026-07-14: buntings became deterministic + kB anchor fix)
-  const GOLDEN_GEOMETRY_HASH = 2000191579;
+  // (regenerated 2026-07-14: WallFrame.box outward winding fix)
+  const GOLDEN_GEOMETRY_HASH = 3274524784;
   const GOLDEN_STATE_HASH = 4068677882;
 
   it('D: scripted build hashes to the golden constants (determinism law)', { timeout: 20_000 }, () => {

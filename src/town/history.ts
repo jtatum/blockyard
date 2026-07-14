@@ -46,6 +46,7 @@ export class History {
   }
 
   undo(): boolean {
+    this.endStroke(); // an in-flight gesture becomes the thing that's undone
     const edits = this.undoStack.pop();
     if (!edits) return false;
     this.town.revert(edits);
@@ -54,11 +55,19 @@ export class History {
   }
 
   redo(): boolean {
+    this.endStroke();
     const edits = this.redoStack.pop();
     if (!edits) return false;
     this.town.reapply(edits);
     this.undoStack.push(edits);
     return true;
+  }
+
+  /** wipe both stacks — for 'new town' and full snapshot restores */
+  clear(): void {
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
+    this.pending = null;
   }
 
   get canUndo(): boolean {

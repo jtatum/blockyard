@@ -1,7 +1,13 @@
 /**
  * Pointer/keyboard → build commands (tech doc §4 /app/input).
- * Left click/drag paints blocks; a quick right-click removes (right-drag
- * orbits); Alt+click eyedrops; number keys / , . pick colors; Ctrl+Z undo.
+ *
+ * Mouse: left click/drag paints (or erases/terraforms per tool); a quick
+ * right-click removes; right-drag orbits; Alt+click eyedrops in build mode;
+ * Alt+drag with line/area tools bulk-removes.
+ *
+ * Touch: TAP acts, one-finger DRAG orbits (never edits — calm over power),
+ * except the deliberate line/area tools, which capture the drag as a gesture
+ * and pause the camera while it runs. Pinch zooms, two-finger drag pans.
  */
 
 import * as THREE from 'three';
@@ -9,10 +15,13 @@ import type { Grid } from '../grid/grid';
 import { pick, type Pick } from '../grid/picking';
 import type { History } from '../town/history';
 import { PALETTE } from '../town/palette';
-import { LAND, WATER, type Town } from '../town/town';
+import { LAND, WATER, type Edit, type Town } from '../town/town';
 import type { CameraRig } from '../render/camera';
 import type { HoverHighlight } from '../render/highlight';
 import type { Chrome } from '../ui/chrome';
+
+const TAP_SLOP_PX = 9;
+const TAP_MS = 450;
 
 export class InputController {
   private raycaster = new THREE.Raycaster();
@@ -21,6 +30,10 @@ export class InputController {
   private lastPlaced: { cell: number; level: number } | null = null;
   /** last pointer ground point during a paint stroke, for gap-free drags */
   private lastPaintPt: { x: number; z: number } | null = null;
+  private rightDown: { x: number; y: number; t: number } | null = null;
+  /** pending touch tap (deferred until pointerup so drags stay pure orbit) */
+  private touchTap: { x: number; y: number; t: number } | null = null;
+  private lastPick: Pick | null = null;
   /** active bulk line/area gesture (BB1/BB2/BB4) */
   private bulk: {
     startCell: number;
@@ -29,8 +42,6 @@ export class InputController {
     removing: boolean;
     targets: number[];
   } | null = null;
-  private rightDown: { x: number; y: number; t: number } | null = null;
-  private lastPick: Pick | null = null;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -49,7 +60,7 @@ export class InputController {
     canvas.addEventListener('pointerleave', () => this.highlight.hide());
   }
 
-  private pickAt(e: PointerEvent): Pick | null {
+  private pickAt(e: { clientX: number; clientY: number }): Pick | null {
     const rect = this.canvas.getBoundingClientRect();
     this.ndc.set(
       ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -59,79 +70,84 @@ export class InputController {
     return pick(this.grid, this.town, this.raycaster.ray);
   }
 
+  // -- gestures --------------------------------------------------------------
+
   private onPointerDown = (e: PointerEvent): void => {
-    if (e.button === 0) {
-      const p = this.pickAt(e);
-      if (e.altKey) {
-        // eyedropper
-        if (p?.remove) this.chrome.setColor(this.town.colorAt(p.remove.cell, p.remove.level));
-        return;
-      }
-      const tool = this.chrome.tool;
-      if (tool === 'line' || tool === 'area') {
-        if (!p) return;
-        const removing = e.altKey;
-        const level = removing ? (p.remove?.level ?? 0) : (p.place?.level ?? 0);
-        const startCell = removing ? (p.remove?.cell ?? p.cell) : (p.place?.cell ?? p.cell);
-        this.bulk = { startCell, startNdc: this.ndc.clone(), level, removing, targets: [startCell] };
-        this.highlight.showCells(this.grid, [startCell], level, removing);
-        return;
-      }
-      this.painting = true;
-      this.lastPlaced = null;
-      this.lastPaintPt = p ? { x: p.point.x, z: p.point.z } : null;
-      this.history.beginStroke();
-      if (tool !== 'build') {
-        if (p) this.terraformAt(p.cell);
-        return;
-      }
-      if (p?.place) this.placeAt(p.place);
-    } else if (e.button === 2) {
+    if (e.button === 2) {
       this.rightDown = { x: e.clientX, y: e.clientY, t: performance.now() };
+      return;
     }
+    if (e.button !== 0) return;
+    const tool = this.chrome.tool;
+    const isTouch = e.pointerType !== 'mouse';
+    const p = this.pickAt(e);
+
+    // build-mode Alt+click = eyedropper (mouse); other tools keep Alt free
+    if (!isTouch && e.altKey && tool === 'build') {
+      if (p?.remove) this.chrome.setColor(this.town.colorAt(p.remove.cell, p.remove.level));
+      return;
+    }
+
+    if (tool === 'line' || tool === 'area') {
+      if (!p) return;
+      const removing = e.altKey;
+      const level = removing ? (p.remove?.level ?? 0) : (p.place?.level ?? 0);
+      const startCell = removing ? (p.remove?.cell ?? p.cell) : (p.place?.cell ?? p.cell);
+      this.bulk = { startCell, startNdc: this.ndc.clone(), level, removing, targets: [startCell] };
+      this.highlight.showCells(this.grid, [startCell], level, removing);
+      if (isTouch) this.rig.controls.enabled = false; // gesture owns the finger
+      return;
+    }
+
+    if (isTouch) {
+      // defer: a tap acts on pointerup; a drag is pure camera orbit
+      this.touchTap = { x: e.clientX, y: e.clientY, t: performance.now() };
+      return;
+    }
+
+    this.painting = true;
+    this.lastPlaced = null;
+    this.lastPaintPt = p ? { x: p.point.x, z: p.point.z } : null;
+    this.history.beginStroke();
+    if (p) this.actAt(tool, p, true);
   };
 
   private onPointerMove = (e: PointerEvent): void => {
     const p = this.pickAt(e);
     this.lastPick = p;
+
     if (this.bulk) {
       this.updateBulkTargets(p);
       this.highlight.showCells(this.grid, this.bulk.targets, this.bulk.level, this.bulk.removing);
       return;
     }
-    if (this.chrome.tool === 'line' || this.chrome.tool === 'area') {
-      if (p?.place) this.highlight.show(this.grid, p.place.cell, p.place.level);
+
+    const tool = this.chrome.tool;
+    if (this.painting && p) {
+      this.actAt(tool, p, false);
+    }
+
+    // hover ghost
+    if (!p) {
+      this.highlight.hide();
+    } else if (tool === 'build' || tool === 'line' || tool === 'area') {
+      if (p.place) this.highlight.show(this.grid, p.place.cell, p.place.level);
       else this.highlight.hide();
-      return;
-    }
-    if (this.chrome.tool !== 'build') {
-      if (this.painting && p) {
-        for (const cell of this.strokeCells(p)) this.terraformAt(cell);
-      }
-      if (p) this.highlight.show(this.grid, p.cell, 0);
+    } else if (tool === 'erase') {
+      if (p.remove) this.highlight.showCells(this.grid, [p.remove.cell], p.remove.level, true);
       else this.highlight.hide();
-      return;
+    } else {
+      this.highlight.show(this.grid, p.cell, 0);
     }
-    if (this.painting && p?.place) {
-      // gap-free ground painting: fill every cell the pointer crossed
-      if (p.face === 'ground') {
-        for (const cell of this.strokeCells(p)) {
-          if (!this.town.isFilled(cell, 0)) this.placeAt({ cell, level: 0 });
-        }
-      }
-      const lp = this.lastPlaced;
-      if (!lp || lp.cell !== p.place.cell || lp.level !== p.place.level) this.placeAt(p.place);
-    }
-    if (p?.place) this.highlight.show(this.grid, p.place.cell, p.place.level);
-    else this.highlight.hide();
   };
 
   private onPointerUp = (e: PointerEvent): void => {
     if (e.button === 0 && this.bulk) {
       const { targets, level, removing } = this.bulk;
       this.bulk = null;
+      this.rig.controls.enabled = true;
       this.highlight.hide();
-      const edits: Parameters<History['commit']>[0] = [];
+      const edits: Edit[] = [];
       for (const cell of targets) {
         if (removing) {
           if (this.town.isFilled(cell, level)) edits.push({ kind: 'voxel', cell, level, after: null });
@@ -140,6 +156,20 @@ export class InputController {
         }
       }
       this.history.commit(edits); // one undo step (BB1/BB2 acceptance)
+      return;
+    }
+    if (e.button === 0 && this.touchTap) {
+      const tap = this.touchTap;
+      this.touchTap = null;
+      const moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
+      if (moved < TAP_SLOP_PX && performance.now() - tap.t < TAP_MS) {
+        const p = this.pickAt(e);
+        if (p) {
+          this.history.beginStroke();
+          this.actAt(this.chrome.tool, p, true);
+          this.history.endStroke();
+        }
+      }
       return;
     }
     if (e.button === 0 && this.painting) {
@@ -158,18 +188,49 @@ export class InputController {
     }
   };
 
-  private placeAt(target: { cell: number; level: number }): void {
-    this.history.commit([
-      { kind: 'voxel', cell: target.cell, level: target.level, after: this.chrome.color },
-    ]);
-    this.lastPlaced = target;
+  // -- actions ---------------------------------------------------------------
+
+  /** apply the current tool at a pick; batches everything into one commit */
+  private actAt(tool: string, p: Pick, isFirst: boolean): void {
+    const edits: Edit[] = [];
+    if (tool === 'build') {
+      if (p.face === 'ground' && !isFirst) {
+        for (const cell of this.strokeCells(p)) {
+          if (!this.town.isFilled(cell, 0)) {
+            edits.push({ kind: 'voxel', cell, level: 0, after: this.chrome.color });
+            this.lastPlaced = { cell, level: 0 };
+          }
+        }
+      }
+      if (p.place) {
+        const lp = this.lastPlaced;
+        if (!lp || lp.cell !== p.place.cell || lp.level !== p.place.level) {
+          edits.push({ kind: 'voxel', cell: p.place.cell, level: p.place.level, after: this.chrome.color });
+          this.lastPlaced = { cell: p.place.cell, level: p.place.level };
+        }
+      }
+    } else if (tool === 'erase') {
+      if (p.remove) {
+        const lp = this.lastPlaced;
+        if (!lp || lp.cell !== p.remove.cell || lp.level !== p.remove.level) {
+          edits.push({ kind: 'voxel', cell: p.remove.cell, level: p.remove.level, after: null });
+          this.lastPlaced = { cell: p.remove.cell, level: p.remove.level };
+        }
+      }
+    } else if (tool === 'land' || tool === 'water') {
+      const want = tool === 'land' ? LAND : WATER;
+      const cells = isFirst ? [p.cell] : this.strokeCells(p);
+      for (const cell of cells) {
+        if (this.town.base(cell) !== want) edits.push({ kind: 'terrain', cell, after: want });
+      }
+    }
+    if (edits.length > 0) this.history.commit(edits);
   }
 
   /** recompute bulk gesture targets from the current pointer */
   private updateBulkTargets(p: Pick | null): void {
     const bulk = this.bulk!;
     if (this.chrome.tool === 'line') {
-      // line: straightest neighbor walk from start toward the pointer cell
       let endCell = bulk.startCell;
       if (p) {
         const ground = this.grid.cellAt(p.point.x, p.point.z);
@@ -243,12 +304,7 @@ export class InputController {
     return out;
   }
 
-  /** raise/dig the base cell under the pointer (T1–T3); buildings adapt */
-  private terraformAt(cell: number): void {
-    const want = this.chrome.tool === 'land' ? LAND : WATER;
-    if (this.town.base(cell) === want) return;
-    this.history.commit([{ kind: 'terrain', cell, after: want }]);
-  }
+  // -- keyboard ---------------------------------------------------------------
 
   private onKey = (e: KeyboardEvent): void => {
     const mod = e.metaKey || e.ctrlKey;
@@ -263,11 +319,14 @@ export class InputController {
       this.history.redo();
       return;
     }
-    if (e.key.toLowerCase() === 'b') this.chrome.setTool('build');
-    else if (e.key.toLowerCase() === 'n') this.chrome.setTool('line');
-    else if (e.key.toLowerCase() === 'm') this.chrome.setTool('area');
-    else if (e.key.toLowerCase() === 'l') this.chrome.setTool('land');
-    else if (e.key.toLowerCase() === 'w') this.chrome.setTool('water');
+    if (mod || e.altKey) return; // browser chords (Cmd+1, Ctrl+W…) are not ours
+    const k = e.key.toLowerCase();
+    if (k === 'b') this.chrome.setTool('build');
+    else if (k === 'e') this.chrome.setTool('erase');
+    else if (k === 'n') this.chrome.setTool('line');
+    else if (k === 'm') this.chrome.setTool('area');
+    else if (k === 'l') this.chrome.setTool('land');
+    else if (k === 'w') this.chrome.setTool('water');
     else if (e.key >= '1' && e.key <= '9') this.chrome.setColor(Number(e.key) - 1);
     else if (e.key === '0') this.chrome.setColor(9);
     else if (e.key === ',') this.chrome.setColor((this.chrome.color + PALETTE.length - 1) % PALETTE.length);

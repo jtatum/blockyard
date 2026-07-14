@@ -115,7 +115,9 @@ export function pick(grid: Grid, town: Town, ray: THREE.Ray): Pick | null {
       let top = level;
       while (top + 1 < MAX_LEVELS && mask & (1 << (top + 1))) top++;
       const clip = clipPrism(grid, cellId, levelY(level), levelY(top + 1), o, d);
-      if (clip && clip.tEnter < (best?.t ?? Infinity) && clip.tEnter >= 0) {
+      // tEnter must be strictly positive: a ray starting inside a prism has no
+      // entry face and must not fabricate a t=0 'top' hit
+      if (clip && clip.tEnter < (best?.t ?? Infinity) && clip.tEnter > 1e-6) {
         // which voxel within the run: from the hit height
         const hitY = o.y + d.y * clip.tEnter;
         let hitLevel =

@@ -5,7 +5,7 @@
 
 import { PALETTE } from '../town/palette';
 
-export type Tool = 'build' | 'line' | 'area' | 'land' | 'water';
+export type Tool = 'build' | 'erase' | 'line' | 'area' | 'land' | 'water';
 
 export interface ChromeCallbacks {
   onColor(index: number): void;
@@ -69,11 +69,30 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
     }
     .by-tool:hover { background: rgba(255,255,255,0.6); }
     .by-tool.sel { background: rgba(44,62,80,0.85); color: #fff; }
+    .by-bar, .by-tools, .by-corner { transition: opacity 0.9s ease; }
     .by-hint {
       position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
       color: rgba(40,60,80,0.85); font-size: 14px; pointer-events: none;
       background: rgba(255,255,255,0.4); padding: 6px 14px; border-radius: 10px;
       backdrop-filter: blur(6px); transition: opacity 1.2s;
+    }
+    /* narrow screens: single-row scrollable palette, everything stacked clear
+       (last in the sheet so these override the base rules above) */
+    @media (max-width: 700px) {
+      .by-time { bottom: auto !important; top: 12px !important; left: 12px !important; width: 150px !important; }
+      .by-hint { top: 68px; max-width: 86vw; text-align: center; }
+      .by-bar {
+        bottom: 10px; flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start;
+        max-width: calc(100vw - 20px); padding: 7px 9px; scrollbar-width: none;
+      }
+      .by-swatch { width: 26px; height: 26px; flex: none; }
+      .by-tools {
+        bottom: 60px; flex-wrap: nowrap; overflow-x: auto;
+        max-width: calc(100vw - 20px); scrollbar-width: none;
+      }
+      .by-tool { font-size: 12px; padding: 0 7px; white-space: nowrap; flex: none; }
+      .by-corner { gap: 3px; right: 8px; }
+      .by-btn { min-width: 30px; height: 30px; font-size: 13px; padding: 0 5px; }
     }
   `;
   document.head.appendChild(style);
@@ -108,6 +127,7 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
     tools.appendChild(b);
   };
   mkTool('build', '⌂ build', 'Place blocks (B)');
+  mkTool('erase', '⌫ erase', 'Remove blocks (E)');
   mkTool('line', '― line', 'Drag a straight run of blocks; Alt-drag removes (N)');
   mkTool('area', '▦ area', 'Drag to fill a region; Alt-drag removes (M)');
   mkTool('land', '▲ land', 'Raise land from water (L)');
@@ -130,25 +150,56 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
   mkBtn('#', 'Toggle grid (G)', cb.onToggleGrid);
   const shareBtn = mkBtn('⛓', 'Copy share link', () => {
     void cb.onShare().then((copied) => {
-      shareBtn.textContent = copied ? '✓' : '⛓';
-      setTimeout(() => (shareBtn.textContent = '⛓'), 1400);
+      // the URL bar always gets the link; tell the user what happened either way
+      shareBtn.textContent = copied ? '✓' : '⚠';
+      shareBtn.title = copied
+        ? 'Link copied to clipboard'
+        : 'Could not access the clipboard — copy the link from the address bar';
+      setTimeout(() => {
+        shareBtn.textContent = '⛓';
+        shareBtn.title = 'Copy share link';
+      }, 2500);
     });
   });
   mkBtn('📷', 'Save a picture', cb.onScreenshot);
   mkBtn('✕', 'New town', cb.onNew);
   root.appendChild(corner);
 
+  const touch = window.matchMedia('(pointer: coarse)').matches;
   const hint = document.createElement('div');
   hint.className = 'by-hint';
-  hint.textContent = 'Click to build · right-click to remove · drag right button to orbit';
+  hint.textContent = touch
+    ? 'Tap to build · drag to look around · ⌫ erases'
+    : 'Click to build · right-click to remove · drag right button to orbit';
   root.appendChild(hint);
+  let hintUses = 0;
   const fadeHint = () => {
+    // survive the first couple of interactions so it can actually be read
+    if (++hintUses < 3) return;
     hint.style.opacity = '0';
     setTimeout(() => hint.remove(), 1500);
     window.removeEventListener('pointerdown', fadeHint);
   };
-  setTimeout(fadeHint, 9000);
+  setTimeout(() => {
+    hintUses = 99;
+    fadeHint();
+  }, 14000);
   window.addEventListener('pointerdown', fadeHint);
+
+  // product U2: chrome dims when idle, wakes on any pointer/key activity
+  let idleTimer = 0;
+  const dimmables = [bar, tools, corner];
+  const wake = () => {
+    for (const el of dimmables) el.style.opacity = '1';
+    window.clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(() => {
+      for (const el of dimmables) el.style.opacity = '0.35';
+    }, 7000);
+  };
+  window.addEventListener('pointermove', wake, { passive: true });
+  window.addEventListener('pointerdown', wake, { passive: true });
+  window.addEventListener('keydown', wake);
+  wake();
 
   const api: Chrome = {
     setColor(i: number) {

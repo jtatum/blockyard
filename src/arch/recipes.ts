@@ -189,11 +189,20 @@ export function computeRecipes(town: Town): RecipeSet {
   return out;
 }
 
-/** stable signature used by the mesher to diff recipe output across edits */
-export function recipeSignatureCells(r: RecipeSet): Set<number> {
-  const cells = new Set<number>();
-  for (const c of r.lanterns.keys()) cells.add(c);
-  for (const b of r.buntings) { cells.add(b.cellA); cells.add(b.cellB); }
-  for (const c of r.gardens) cells.add(c);
-  return cells;
+/**
+ * Stable per-cell signature used by the mesher to diff recipe output across
+ * edits. Values matter, not just membership: a bunting whose far endpoint
+ * changed color must dirty the chunk that OWNS the bunting geometry (cellA).
+ */
+export function recipeSignature(r: RecipeSet): Map<number, string> {
+  const sig = new Map<number, string>();
+  const add = (cell: number, s: string) => sig.set(cell, (sig.get(cell) ?? '') + s + ';');
+  for (const l of r.lanterns.values()) add(l.cell, 'L' + l.level);
+  for (const b of r.buntings) {
+    const s = `B${b.cellA},${b.kA},${b.cellB},${b.kB},${b.level},${b.colorA},${b.colorB}`;
+    add(b.cellA, s);
+    add(b.cellB, s);
+  }
+  for (const c of r.gardens) add(c, 'G');
+  return sig;
 }

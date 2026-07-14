@@ -71,6 +71,7 @@ async function boot(): Promise<void> {
     daylight.set(t);
     sky.update(daylight.state);
     shell.renderer.toneMappingExposure = daylight.state.exposure;
+    shell.renderer.shadowMap.needsUpdate = true; // sun moved
     town.notify(new Set()); // nudge autosave; empty set skips remeshing
   };
 
@@ -86,6 +87,7 @@ async function boot(): Promise<void> {
     terrainMesh.geometry.dispose();
     terrainMesh = buildTerrainMesh(town);
     scene.add(terrainMesh);
+    shell.renderer.shadowMap.needsUpdate = true; // geometry changed
   });
 
   const gridOverlay = buildGridOverlay(grid);
@@ -115,6 +117,7 @@ async function boot(): Promise<void> {
       if (!window.confirm('Start a fresh town? The current one will be cleared.')) return;
       await clearAutosave();
       window.history.replaceState(null, '', location.pathname);
+      history.clear(); // the old town must not be resurrectable via undo
       town.clear(ISLAND_RADIUS);
     },
     onScreenshot: () => exportScreenshot(),

@@ -127,14 +127,16 @@ export class WallFrame {
     sink.quad(this.p(u0, v1, 0), this.p(u1, v1, 0), this.p(u1, v1, d), this.p(u0, v1, d), color);
   }
 
-  /** a raised box on the wall surface (sills, shutters, lintels), thickness t outward */
+  /** a raised box on the wall surface (sills, shutters, lintels), thickness t outward.
+   *  Side windings are the MIRROR of reveal() — a solid's faces point away from
+   *  its volume, a hole's faces point into it. */
   box(sink: GeoSink, u0: number, v0: number, u1: number, v1: number, t: number, color: THREE.Color): void {
     const D = -t; // outward is negative d
     this.rect(sink, u0, v0, u1, v1, D, color);
-    // sides of the box
-    sink.quad(this.p(u0, v0, 0), this.p(u0, v0, D), this.p(u0, v1, D), this.p(u0, v1, 0), color);
-    sink.quad(this.p(u1, v0, D), this.p(u1, v0, 0), this.p(u1, v1, 0), this.p(u1, v1, D), color);
-    sink.quad(this.p(u0, v1, 0), this.p(u0, v1, D), this.p(u1, v1, D), this.p(u1, v1, 0), color);
-    sink.quad(this.p(u0, v0, D), this.p(u0, v0, 0), this.p(u1, v0, 0), this.p(u1, v0, D), color);
+    // sides of the box, outward-facing
+    sink.quad(this.p(u0, v0, D), this.p(u0, v0, 0), this.p(u0, v1, 0), this.p(u0, v1, D), color);
+    sink.quad(this.p(u1, v0, 0), this.p(u1, v0, D), this.p(u1, v1, D), this.p(u1, v1, 0), color);
+    sink.quad(this.p(u0, v1, D), this.p(u0, v1, 0), this.p(u1, v1, 0), this.p(u1, v1, D), color);
+    sink.quad(this.p(u0, v0, 0), this.p(u0, v0, D), this.p(u1, v0, D), this.p(u1, v0, 0), color);
   }
 }

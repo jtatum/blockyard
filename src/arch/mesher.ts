@@ -14,7 +14,7 @@ import type { Grid } from '../grid/grid';
 import type { Town } from '../town/town';
 import { GeoSink } from './geom';
 import { emitBunting, emitGardenCell, emitLantern } from './props';
-import { computeRecipes, recipeSignatureCells, type RecipeSet } from './recipes';
+import { computeRecipes, recipeSignature, type RecipeSet } from './recipes';
 import { computeRoofRegions, emitRoofCell, emitRoofEdges, type RoofRegion } from './roofs';
 import { emitWall } from './walls';
 
@@ -85,14 +85,14 @@ export class ArchMesher {
     this.regions = computeRoofRegions(this.town);
     for (const r of this.regions) if (touches(r)) for (const c of r.cells) affectedCells.add(c);
 
-    // recipes are global pattern matches; rebuild chunks wherever they changed
-    const oldRecipeCells = recipeSignatureCells(this.recipes);
+    // recipes are global pattern matches; rebuild chunks wherever their
+    // per-cell signature changed (appearance, disappearance, OR value change —
+    // e.g. a bunting endpoint recolored two cells away)
+    const oldSig = recipeSignature(this.recipes);
     this.recipes = computeRecipes(this.town);
-    const newRecipeCells = recipeSignatureCells(this.recipes);
-    for (const c of oldRecipeCells) if (!newRecipeCells.has(c)) affectedCells.add(c);
-    for (const c of newRecipeCells) if (!oldRecipeCells.has(c)) affectedCells.add(c);
-    // any recipe cell near the edit is conservatively refreshed (color changes)
-    for (const c of newRecipeCells) if (expanded.has(c)) affectedCells.add(c);
+    const newSig = recipeSignature(this.recipes);
+    for (const [c, s] of oldSig) if (newSig.get(c) !== s) affectedCells.add(c);
+    for (const [c, s] of newSig) if (oldSig.get(c) !== s) affectedCells.add(c);
 
     const chunks = new Set<number>();
     for (const c of affectedCells) chunks.add(this.chunkOfCell[c]!);
