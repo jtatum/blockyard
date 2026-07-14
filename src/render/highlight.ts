@@ -10,7 +10,7 @@ import type { Grid } from '../grid/grid';
 export class HoverHighlight {
   readonly group = new THREE.Group();
   private ghost: THREE.Mesh;
-  private outline: THREE.LineLoop;
+  private outline: THREE.LineSegments;
 
   constructor() {
     this.ghost = new THREE.Mesh(
@@ -23,7 +23,7 @@ export class HoverHighlight {
         side: THREE.DoubleSide,
       })
     );
-    this.outline = new THREE.LineLoop(
+    this.outline = new THREE.LineSegments(
       new THREE.BufferGeometry(),
       new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 })
     );
@@ -38,33 +38,42 @@ export class HoverHighlight {
 
   /** show ghost block at (cell, level) */
   show(grid: Grid, cell: number, level: number): void {
-    const c = grid.cells[cell]!;
-    const corners = [0, 1, 2, 3].map((k) => grid.corner(c, k));
+    this.showCells(grid, [cell], level);
+  }
+
+  /** show a multi-cell ghost (bulk line/area previews); red tint when removing */
+  showCells(grid: Grid, cells: readonly number[], level: number, removing = false): void {
+    const pos: number[] = [];
+    const oPos: number[] = [];
     const y0 = levelY(level) + 0.02;
     const y1 = levelY(level + 1) - 0.02;
-    const pos: number[] = [];
-    // top
-    pos.push(
-      corners[0]!.x, y1, corners[0]!.y, corners[2]!.x, y1, corners[2]!.y, corners[1]!.x, y1, corners[1]!.y,
-      corners[0]!.x, y1, corners[0]!.y, corners[3]!.x, y1, corners[3]!.y, corners[2]!.x, y1, corners[2]!.y
-    );
-    // sides
-    for (let k = 0; k < 4; k++) {
-      const a = corners[k]!;
-      const b = corners[(k + 1) % 4]!;
-      pos.push(a.x, y0, a.y, b.x, y0, b.y, b.x, y1, b.y, a.x, y0, a.y, b.x, y1, b.y, a.x, y1, a.y);
+    for (const cell of cells) {
+      const c = grid.cells[cell];
+      if (!c) continue;
+      const corners = [0, 1, 2, 3].map((k) => grid.corner(c, k));
+      pos.push(
+        corners[0]!.x, y1, corners[0]!.y, corners[2]!.x, y1, corners[2]!.y, corners[1]!.x, y1, corners[1]!.y,
+        corners[0]!.x, y1, corners[0]!.y, corners[3]!.x, y1, corners[3]!.y, corners[2]!.x, y1, corners[2]!.y
+      );
+      for (let k = 0; k < 4; k++) {
+        const a = corners[k]!;
+        const b = corners[(k + 1) % 4]!;
+        pos.push(a.x, y0, a.y, b.x, y0, b.y, b.x, y1, b.y, a.x, y0, a.y, b.x, y1, b.y, a.x, y1, a.y);
+        // outline as segment pairs so disjoint cells don't connect
+        oPos.push(a.x, y0, a.y, b.x, y0, b.y);
+      }
     }
     this.ghost.geometry.dispose();
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     this.ghost.geometry = g;
+    (this.ghost.material as THREE.MeshBasicMaterial).color.setHex(removing ? 0xff8a7a : 0xffffff);
 
-    const oPos: number[] = [];
-    for (const p of corners) oPos.push(p.x, y0, p.y);
     this.outline.geometry.dispose();
     const og = new THREE.BufferGeometry();
     og.setAttribute('position', new THREE.Float32BufferAttribute(oPos, 3));
     this.outline.geometry = og;
+    (this.outline.material as THREE.LineBasicMaterial).color.setHex(removing ? 0xff8a7a : 0xffffff);
 
     this.group.visible = true;
   }

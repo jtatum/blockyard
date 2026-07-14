@@ -5,7 +5,7 @@
 
 import { PALETTE } from '../town/palette';
 
-export type Tool = 'build' | 'land' | 'water';
+export type Tool = 'build' | 'line' | 'area' | 'land' | 'water';
 
 export interface ChromeCallbacks {
   onColor(index: number): void;
@@ -108,6 +108,8 @@ export function initChrome(root: HTMLElement, cb: ChromeCallbacks): Chrome {
     tools.appendChild(b);
   };
   mkTool('build', '⌂ build', 'Place blocks (B)');
+  mkTool('line', '― line', 'Drag a straight run of blocks; Alt-drag removes (N)');
+  mkTool('area', '▦ area', 'Drag to fill a region; Alt-drag removes (M)');
   mkTool('land', '▲ land', 'Raise land from water (L)');
   mkTool('water', '≈ water', 'Dig land down to water (W)');
   root.appendChild(tools);

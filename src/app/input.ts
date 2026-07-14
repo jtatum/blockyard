@@ -21,6 +21,14 @@ export class InputController {
   private lastPlaced: { cell: number; level: number } | null = null;
   /** last pointer ground point during a paint stroke, for gap-free drags */
   private lastPaintPt: { x: number; z: number } | null = null;
+  /** active bulk line/area gesture (BB1/BB2/BB4) */
+  private bulk: {
+    startCell: number;
+    startNdc: THREE.Vector2;
+    level: number;
+    removing: boolean;
+    targets: number[];
+  } | null = null;
   private rightDown: { x: number; y: number; t: number } | null = null;
   private lastPick: Pick | null = null;
 
@@ -59,11 +67,21 @@ export class InputController {
         if (p?.remove) this.chrome.setColor(this.town.colorAt(p.remove.cell, p.remove.level));
         return;
       }
+      const tool = this.chrome.tool;
+      if (tool === 'line' || tool === 'area') {
+        if (!p) return;
+        const removing = e.altKey;
+        const level = removing ? (p.remove?.level ?? 0) : (p.place?.level ?? 0);
+        const startCell = removing ? (p.remove?.cell ?? p.cell) : (p.place?.cell ?? p.cell);
+        this.bulk = { startCell, startNdc: this.ndc.clone(), level, removing, targets: [startCell] };
+        this.highlight.showCells(this.grid, [startCell], level, removing);
+        return;
+      }
       this.painting = true;
       this.lastPlaced = null;
       this.lastPaintPt = p ? { x: p.point.x, z: p.point.z } : null;
       this.history.beginStroke();
-      if (this.chrome.tool !== 'build') {
+      if (tool !== 'build') {
         if (p) this.terraformAt(p.cell);
         return;
       }
@@ -76,6 +94,16 @@ export class InputController {
   private onPointerMove = (e: PointerEvent): void => {
     const p = this.pickAt(e);
     this.lastPick = p;
+    if (this.bulk) {
+      this.updateBulkTargets(p);
+      this.highlight.showCells(this.grid, this.bulk.targets, this.bulk.level, this.bulk.removing);
+      return;
+    }
+    if (this.chrome.tool === 'line' || this.chrome.tool === 'area') {
+      if (p?.place) this.highlight.show(this.grid, p.place.cell, p.place.level);
+      else this.highlight.hide();
+      return;
+    }
     if (this.chrome.tool !== 'build') {
       if (this.painting && p) {
         for (const cell of this.strokeCells(p)) this.terraformAt(cell);
@@ -99,6 +127,21 @@ export class InputController {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
+    if (e.button === 0 && this.bulk) {
+      const { targets, level, removing } = this.bulk;
+      this.bulk = null;
+      this.highlight.hide();
+      const edits: Parameters<History['commit']>[0] = [];
+      for (const cell of targets) {
+        if (removing) {
+          if (this.town.isFilled(cell, level)) edits.push({ kind: 'voxel', cell, level, after: null });
+        } else if (!this.town.isFilled(cell, level)) {
+          edits.push({ kind: 'voxel', cell, level, after: this.chrome.color });
+        }
+      }
+      this.history.commit(edits); // one undo step (BB1/BB2 acceptance)
+      return;
+    }
     if (e.button === 0 && this.painting) {
       this.painting = false;
       this.history.endStroke();
@@ -120,6 +163,68 @@ export class InputController {
       { kind: 'voxel', cell: target.cell, level: target.level, after: this.chrome.color },
     ]);
     this.lastPlaced = target;
+  }
+
+  /** recompute bulk gesture targets from the current pointer */
+  private updateBulkTargets(p: Pick | null): void {
+    const bulk = this.bulk!;
+    if (this.chrome.tool === 'line') {
+      // line: straightest neighbor walk from start toward the pointer cell
+      let endCell = bulk.startCell;
+      if (p) {
+        const ground = this.grid.cellAt(p.point.x, p.point.z);
+        endCell = ground >= 0 ? ground : p.cell;
+      }
+      bulk.targets = this.linePath(bulk.startCell, endCell);
+    } else {
+      // area: cells whose centroid projects into the dragged screen rect
+      const x0 = Math.min(bulk.startNdc.x, this.ndc.x);
+      const x1 = Math.max(bulk.startNdc.x, this.ndc.x);
+      const y0 = Math.min(bulk.startNdc.y, this.ndc.y);
+      const y1 = Math.max(bulk.startNdc.y, this.ndc.y);
+      const v = new THREE.Vector3();
+      const targets: number[] = [];
+      for (const c of this.grid.cells) {
+        v.set(c.cx, 0.3, c.cy).project(this.rig.camera);
+        if (v.x >= x0 && v.x <= x1 && v.y >= y0 && v.y <= y1 && v.z < 1) targets.push(c.id);
+      }
+      bulk.targets = targets.length > 0 ? targets : [bulk.startCell];
+    }
+  }
+
+  /** straightest path between two cells over edge adjacency (BB1) */
+  private linePath(from: number, to: number): number[] {
+    const grid = this.grid;
+    const B = grid.cells[to]!;
+    const A = grid.cells[from]!;
+    const dx = B.cx - A.cx;
+    const dy = B.cy - A.cy;
+    const len2 = dx * dx + dy * dy || 1;
+    const path = [from];
+    let cur = from;
+    while (cur !== to && path.length < 96) {
+      const c = grid.cells[cur]!;
+      const curDist = Math.hypot(c.cx - B.cx, c.cy - B.cy);
+      let best = -1;
+      let bestScore = Infinity;
+      for (const n of c.neighbors) {
+        if (n < 0) continue;
+        const nc = grid.cells[n]!;
+        const distT = Math.hypot(nc.cx - B.cx, nc.cy - B.cy);
+        if (distT >= curDist) continue; // must make progress
+        const t = Math.max(0, Math.min(1, ((nc.cx - A.cx) * dx + (nc.cy - A.cy) * dy) / len2));
+        const dev = Math.hypot(nc.cx - (A.cx + dx * t), nc.cy - (A.cy + dy * t));
+        const score = distT + dev * 1.6;
+        if (score < bestScore) {
+          bestScore = score;
+          best = n;
+        }
+      }
+      if (best < 0) break;
+      path.push(best);
+      cur = best;
+    }
+    return path;
   }
 
   /** cells crossed since the last paint sample (segment-walk, gap-free drags) */
@@ -159,6 +264,8 @@ export class InputController {
       return;
     }
     if (e.key.toLowerCase() === 'b') this.chrome.setTool('build');
+    else if (e.key.toLowerCase() === 'n') this.chrome.setTool('line');
+    else if (e.key.toLowerCase() === 'm') this.chrome.setTool('area');
     else if (e.key.toLowerCase() === 'l') this.chrome.setTool('land');
     else if (e.key.toLowerCase() === 'w') this.chrome.setTool('water');
     else if (e.key >= '1' && e.key <= '9') this.chrome.setColor(Number(e.key) - 1);
