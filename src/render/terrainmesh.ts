@@ -9,6 +9,7 @@ import { hashKey } from '../core/rng';
 import type { Town } from '../town/town';
 
 const GRASS = new THREE.Color(0xa8bf7e);
+const COBBLE = new THREE.Color(0xc9bda6);
 const SAND = new THREE.Color(0xd8c48e);
 
 export function buildTerrainMesh(town: Town): THREE.Mesh {
@@ -27,9 +28,12 @@ export function buildTerrainMesh(town: Town): THREE.Mesh {
   for (const cell of grid.cells) {
     if (!town.isLand(cell.id)) continue;
     const corners = [0, 1, 2, 3].map((k) => grid.corner(cell, k));
+    // cells beside buildings pave into plazas; open land stays grass (A4)
+    let nearBuilding = town.hasAnyBlock(cell.id);
+    for (const n of cell.neighbors) if (n >= 0 && town.hasAnyBlock(n)) nearBuilding = true;
     // subtle deterministic shade variation per cell
     const shade = ((hashKey(grid.seed, cell.id, 'shade') % 1000) / 1000 - 0.5) * 0.07;
-    c.copy(GRASS).offsetHSL(0, 0, shade);
+    c.copy(nearBuilding ? COBBLE : GRASS).offsetHSL(0, 0, shade);
     const y = LAND_TOP;
     push(
       [

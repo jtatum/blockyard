@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { generateGrid } from '../grid/generate';
 import { Town } from '../town/town';
 import { History } from '../town/history';
+import { ArchMesher } from '../arch/mesher';
 import { buildGridOverlay } from '../render/griddebug';
-import { buildBlocksMesh } from '../render/blocksmesh';
 import { buildTerrainMesh } from '../render/terrainmesh';
 import { HoverHighlight } from '../render/highlight';
 import { SceneShell, webgl2Available } from '../render/scene';
@@ -52,17 +52,17 @@ function boot(): void {
   );
   scene.add(water);
 
-  // town-derived meshes, rebuilt on change (incremental chunks come with the mesher)
+  // architecture (chunked, incremental) + terrain fill
+  const mesher = new ArchMesher(town);
+  scene.add(mesher.group);
   let terrainMesh = buildTerrainMesh(town);
-  let blocksMesh = buildBlocksMesh(town);
-  scene.add(terrainMesh, blocksMesh);
-  town.onChange(() => {
-    scene.remove(terrainMesh, blocksMesh);
+  scene.add(terrainMesh);
+  town.onChange((dirty) => {
+    mesher.update(dirty);
+    scene.remove(terrainMesh);
     terrainMesh.geometry.dispose();
-    blocksMesh.geometry.dispose();
     terrainMesh = buildTerrainMesh(town);
-    blocksMesh = buildBlocksMesh(town);
-    scene.add(terrainMesh, blocksMesh);
+    scene.add(terrainMesh);
   });
 
   const gridOverlay = buildGridOverlay(grid);
