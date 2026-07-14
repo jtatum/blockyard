@@ -1,7 +1,16 @@
 import * as THREE from 'three';
 import { generateGrid } from '../grid/generate';
+import { Town } from '../town/town';
+import { History } from '../town/history';
 import { buildGridOverlay } from '../render/griddebug';
+import { buildBlocksMesh } from '../render/blocksmesh';
+import { buildTerrainMesh } from '../render/terrainmesh';
+import { HoverHighlight } from '../render/highlight';
 import { SceneShell, webgl2Available } from '../render/scene';
+import { initChrome } from '../ui/chrome';
+import { InputController } from './input';
+
+const ISLAND_RADIUS = 13;
 
 function boot(): void {
   if (!webgl2Available()) {
@@ -26,50 +35,55 @@ function boot(): void {
   sun.shadow.camera.right = 30;
   sun.shadow.camera.top = 30;
   sun.shadow.camera.bottom = -30;
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.03;
   scene.add(sun);
 
-  // the world grid
+  // world + state
   const grid = generateGrid({});
-
-  // debug: island ground fill (cells near center = land) — replaced by real terrain later
-  const landR = 13;
-  const positions: number[] = [];
-  const colors: number[] = [];
-  const landColor = new THREE.Color(0xb5c78e);
-  const jitter = new THREE.Color();
-  for (const cell of grid.cells) {
-    if (Math.hypot(cell.cx, cell.cy) > landR) continue;
-    jitter.copy(landColor).offsetHSL(0, 0, ((cell.id * 2654435761) % 100) / 100 * 0.06 - 0.03);
-    const y = 0.3;
-    const c = [grid.corner(cell, 0), grid.corner(cell, 1), grid.corner(cell, 2), grid.corner(cell, 3)];
-    // grid CCW -> three.js XZ needs reversed winding for +Y-facing faces
-    for (const tri of [[0, 2, 1], [0, 3, 2]] as const) {
-      for (const i of tri) {
-        positions.push(c[i]!.x, y, c[i]!.y);
-        colors.push(jitter.r, jitter.g, jitter.b);
-      }
-    }
-  }
-  const groundGeo = new THREE.BufferGeometry();
-  groundGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  groundGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  groundGeo.computeVertexNormals();
-  const ground = new THREE.Mesh(
-    groundGeo,
-    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 })
-  );
-  ground.receiveShadow = true;
-  scene.add(ground);
+  const town = new Town(grid);
+  town.seedIsland(ISLAND_RADIUS);
+  const history = new History(town);
 
   // placeholder water
   const water = new THREE.Mesh(
     new THREE.CircleGeometry(200, 64).rotateX(-Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0x4f8fb8, roughness: 0.35, metalness: 0.0 })
+    new THREE.MeshStandardMaterial({ color: 0x4f8fb8, roughness: 0.35 })
   );
-  water.position.y = 0;
   scene.add(water);
 
-  scene.add(buildGridOverlay(grid));
+  // town-derived meshes, rebuilt on change (incremental chunks come with the mesher)
+  let terrainMesh = buildTerrainMesh(town);
+  let blocksMesh = buildBlocksMesh(town);
+  scene.add(terrainMesh, blocksMesh);
+  town.onChange(() => {
+    scene.remove(terrainMesh, blocksMesh);
+    terrainMesh.geometry.dispose();
+    blocksMesh.geometry.dispose();
+    terrainMesh = buildTerrainMesh(town);
+    blocksMesh = buildBlocksMesh(town);
+    scene.add(terrainMesh, blocksMesh);
+  });
+
+  const gridOverlay = buildGridOverlay(grid);
+  gridOverlay.visible = false;
+  scene.add(gridOverlay);
+
+  const highlight = new HoverHighlight();
+  scene.add(highlight.group);
+
+  const chrome = initChrome(document.getElementById('ui')!, {
+    onColor: () => {},
+    onUndo: () => history.undo(),
+    onRedo: () => history.redo(),
+    onToggleGrid: () => (gridOverlay.visible = !gridOverlay.visible),
+  });
+
+  new InputController(canvas, grid, town, history, shell.rig, chrome, highlight);
+  window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() === 'g' && !e.metaKey && !e.ctrlKey)
+      gridOverlay.visible = !gridOverlay.visible;
+  });
 
   shell.start();
 }

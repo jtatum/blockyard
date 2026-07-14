@@ -188,16 +188,18 @@ export function generateGrid(params: Partial<GridParams> = {}): Grid {
       // ideal corner k = centroid + rotCCW^k(v);  rotCCW(x,y) = (-y, x)
       for (let k = 0; k < 4; k++) {
         const vi = qd[k]!;
-        forceX[vi] += cx + vx - verts[vi]!.x;
-        forceY[vi] += cy + vy - verts[vi]!.y;
-        forceN[vi]++;
+        forceX[vi] = forceX[vi]! + (cx + vx - verts[vi]!.x);
+        forceY[vi] = forceY[vi]! + (cy + vy - verts[vi]!.y);
+        forceN[vi] = forceN[vi]! + 1;
         const t = vx; vx = -vy; vy = t;
       }
     }
     for (let vi = 0; vi < verts.length; vi++) {
-      if (boundary[vi] || forceN[vi] === 0) continue;
-      verts[vi]!.x += (forceX[vi]! / forceN[vi]!) * p.relaxStep;
-      verts[vi]!.y += (forceY[vi]! / forceN[vi]!) * p.relaxStep;
+      const n = forceN[vi]!;
+      if (boundary[vi] || n === 0) continue;
+      const v = verts[vi]!;
+      v.x += (forceX[vi]! / n) * p.relaxStep;
+      v.y += (forceY[vi]! / n) * p.relaxStep;
     }
   }
 
