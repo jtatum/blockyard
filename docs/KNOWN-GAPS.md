@@ -9,7 +9,7 @@ product impact. Spec references are to `01-product-spec.md`.
 
 | Spec | Gap | Notes |
 |------|-----|-------|
-| §8 / A6 | **Archways, bridges, stairs, hook/crane recipes** missing (lighthouse, gardens, buntings shipped) | The recipe engine (`src/arch/recipes.ts`) is built for these — each is a predicate + sub-assembly, no engine work needed. Biggest remaining item. |
+| §8 / A6 | **Archways, bridges, hook/crane recipes** missing (lighthouse, gardens, buntings, stairs shipped) | The recipe engine (`src/arch/recipes.ts` + `src/arch/stairs.ts` as the template) is built for these — each is a predicate + sub-assembly. |
 | P2 | **Multiple saved towns / gallery with thumbnails** | Only the single autosave slot exists. Needs an IDB store keyed by id + a gallery panel + thumbnail capture (the screenshot path can render thumbs). |
 | U3/U4, §9 | **Settings panel** (quality, reduce-motion, reset) and **reduced-motion mode**; `prefers-reduced-motion` unrespected; build actions not keyboard-reachable | Water/inertia/day-cycle damping hooks all exist as parameters; needs the panel + a keyboard cursor for placement. |
 | A7 | **Dormers** still missing (chimneys, street lamps, fences, flower beds landed in round 2) | Dormers need roof-surface-aware placement — a small follow-up to the heightfield. |
