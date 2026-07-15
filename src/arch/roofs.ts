@@ -58,13 +58,20 @@ export function roofKindOf(town: Town, cell: number, level: number): RoofKind {
   return PALETTE[town.colorAt(cell, level)]!.roof;
 }
 
-export function computeRoofRegionsForLevel(town: Town, level: number): RoofRegion[] {
+/** `exclude` masks recipe-claimed cells (staircases) out of the roof system —
+ *  they read as unfilled, so e.g. a plaza's eave line opens where stairs land. */
+export function computeRoofRegionsForLevel(
+  town: Town,
+  level: number,
+  exclude?: ReadonlySet<number>
+): RoofRegion[] {
   const grid = town.grid;
   const regions: RoofRegion[] = [];
   const assigned = new Set<number>();
+  const exposed = (c: number): boolean => isTopExposed(town, c, level) && !exclude?.has(c);
 
   for (const start of grid.cells) {
-    if (!isTopExposed(town, start.id, level) || assigned.has(start.id)) continue;
+    if (!exposed(start.id) || assigned.has(start.id)) continue;
     const kind = roofKindOf(town, start.id, level);
     const cells = new Set<number>([start.id]);
     assigned.add(start.id);
@@ -73,23 +80,23 @@ export function computeRoofRegionsForLevel(town: Town, level: number): RoofRegio
       const c = grid.cells[stack.pop()!]!;
       for (const n of c.neighbors) {
         if (n < 0 || cells.has(n)) continue;
-        if (!isTopExposed(town, n, level)) continue;
+        if (!exposed(n)) continue;
         if (roofKindOf(town, n, level) !== kind) continue;
         cells.add(n);
         assigned.add(n);
         stack.push(n);
       }
     }
-    regions.push(buildRegion(town, regions.length, level, kind, cells));
+    regions.push(buildRegion(town, regions.length, level, kind, cells, exclude));
   }
   return regions;
 }
 
 /** all levels (full rebuilds and tests; the mesher caches per level) */
-export function computeRoofRegions(town: Town): RoofRegion[] {
+export function computeRoofRegions(town: Town, exclude?: ReadonlySet<number>): RoofRegion[] {
   const out: RoofRegion[] = [];
   for (let level = 0; level < MAX_LEVELS; level++) {
-    out.push(...computeRoofRegionsForLevel(town, level));
+    out.push(...computeRoofRegionsForLevel(town, level, exclude));
   }
   return out;
 }
@@ -99,17 +106,21 @@ function buildRegion(
   id: number,
   level: number,
   kind: RoofKind,
-  cells: Set<number>
+  cells: Set<number>,
+  exclude?: ReadonlySet<number>
 ): RoofRegion {
   const grid = town.grid;
   const baseY = levelY(level + 1);
 
   // a cone tower = a region that is also isolated at its own level
-  // (no filled neighbor at this level at all, exposed or not)
+  // (no filled neighbor at this level at all, exposed or not; claimed
+  // staircase cells don't break the isolation)
   let cone = false;
   if (cells.size === 1 && kind === 'pitched') {
     const only = [...cells][0]!;
-    cone = grid.cells[only]!.neighbors.every((n) => n < 0 || !town.isFilled(n, level));
+    cone = grid.cells[only]!.neighbors.every(
+      (n) => n < 0 || !town.isFilled(n, level) || exclude?.has(n) === true
+    );
   }
 
   // multi-source Dijkstra over corners + EDGE MIDPOINTS + centroids.
@@ -215,10 +226,18 @@ function buildRegion(
     }
   }
 
-  // smoothed boundary loops, shared with the wall system
+  // smoothed boundary loops, shared with the wall system (and the same
+  // sharp-corner rule: roofs meet neighboring masses flush, no wedges)
   const cornerPoint = new Map<number, { x: number; y: number }>();
+  const sharpAt = (vId: number): boolean => {
+    for (const c of grid.vertices[vId]!.cells) {
+      if (cells.has(c) || exclude?.has(c)) continue;
+      if ((town.filled[c]! >>> level) !== 0) return true;
+    }
+    return false;
+  };
   const loops = walkLoops(grid, (c) => cells.has(c), cells).map((loop) =>
-    smoothLoop(grid, loop, cells.size === 1, cornerPoint)
+    smoothLoop(grid, loop, cells.size === 1, cornerPoint, sharpAt)
   );
   const centralSeg = new Map<string, OSeg>();
   for (const loop of loops) {
@@ -350,10 +369,12 @@ function emitConeRoof(sink: GeoSink, town: Town, region: RoofRegion): void {
     // outward skirt with a small drop, then cone side above it
     const oa = outward(a, c);
     const ob = outward(b, c);
+    const rA = clampReach(town, region.level, a.x, a.y, oa.x, oa.y, OVERHANG * 0.8);
+    const rB = clampReach(town, region.level, b.x, b.y, ob.x, ob.y, OVERHANG * 0.8);
     const A: P3 = { x: a.x, y: baseY + 0.06, z: a.y };
     const B: P3 = { x: b.x, y: baseY + 0.06, z: b.y };
-    const A2: P3 = { x: a.x + oa.x * OVERHANG * 0.8, y: baseY - 0.04, z: a.y + oa.y * OVERHANG * 0.8 };
-    const B2: P3 = { x: b.x + ob.x * OVERHANG * 0.8, y: baseY - 0.04, z: b.y + ob.y * OVERHANG * 0.8 };
+    const A2: P3 = { x: a.x + oa.x * rA, y: baseY - 0.04, z: a.y + oa.y * rA };
+    const B2: P3 = { x: b.x + ob.x * rB, y: baseY - 0.04, z: b.y + ob.y * rB };
     sink.quad(A, B, B2, A2, cTmp);
     sink.quad(A, A2, B2, B, cTmp2); // underside
     const na = coneNormal(a);
@@ -370,12 +391,41 @@ function outward(p: { x: number; y: number }, c: { cx: number; cy: number }): { 
   return { x: dx / len, y: dy / len };
 }
 
-/** eaves (pitched) or parapets (flat) along the smoothed loops */
+/** eave/skirt tips must not slice through neighboring masses: if extending a
+ *  boundary point by `reach` lands inside a cell that is solid at this roof's
+ *  level (a wall, or another roof at the same level), the tip shortens to a
+ *  fixed TUCK. Not flush — the smoothed outlines pull back a few centimeters
+ *  at every boundary vertex, and a flush eave exposes those wedges as a
+ *  stitched seam along the junction; a short tuck hides inside the wall and
+ *  bridges them, without the old full overhang's blades at big corners. */
+const TUCK = 0.09;
+function clampReach(
+  town: Town,
+  level: number,
+  px: number,
+  py: number,
+  dirX: number,
+  dirY: number,
+  reach: number
+): number {
+  const cid = town.grid.cellAt(px + dirX * reach, py + dirY * reach);
+  if (cid < 0) return reach;
+  if (town.isFilled(cid, level) || town.isFilled(cid, level + 1)) {
+    const len = Math.hypot(dirX, dirY) || 1; // miter vectors carry scale
+    return Math.min(reach, TUCK / len);
+  }
+  return reach;
+}
+
+/** eaves (pitched) or parapets (flat) along the smoothed loops.
+ *  `skipSeg` suppresses individual segments (e.g. a plaza's parapet opens
+ *  where a large staircase lands against it). */
 export function emitRoofEdges(
   sink: GeoSink,
   town: Town,
   region: RoofRegion,
-  own: (cell: number) => boolean
+  own: (cell: number) => boolean,
+  skipSeg?: (seg: OSeg) => boolean
 ): void {
   if (region.cone) return; // the cone's skirt is its eave
   const baseY = levelY(region.level + 1);
@@ -405,6 +455,7 @@ export function emitRoofEdges(
     for (let i = 0; i < n; i++) {
       const s = loop[i]!;
       if (!own(s.cell)) continue;
+      if (skipSeg?.(s)) continue;
       const ma = miter(i);
       const mb = miter((i + 1) % n);
       cTmp.setHex(PALETTE[town.colorAt(s.cell, region.level)]!.roofHex);
@@ -412,10 +463,12 @@ export function emitRoofEdges(
 
       if (region.kind === 'pitched') {
         const oy = baseY - EAVE_DROP;
+        const rA = clampReach(town, region.level, s.ax, s.ay, ma.x, ma.y, OVERHANG);
+        const rB = clampReach(town, region.level, s.bx, s.by, mb.x, mb.y, OVERHANG);
         const A: P3 = { x: s.ax, y: baseY, z: s.ay };
         const B: P3 = { x: s.bx, y: baseY, z: s.by };
-        const A2: P3 = { x: s.ax + ma.x * OVERHANG, y: oy, z: s.ay + ma.y * OVERHANG };
-        const B2: P3 = { x: s.bx + mb.x * OVERHANG, y: oy, z: s.by + mb.y * OVERHANG };
+        const A2: P3 = { x: s.ax + ma.x * rA, y: oy, z: s.ay + ma.y * rA };
+        const B2: P3 = { x: s.bx + mb.x * rB, y: oy, z: s.by + mb.y * rB };
         sink.quad(A, B, B2, A2, cTmp);
         sink.quad(A, A2, B2, B, cTmp2); // underside
         const A3: P3 = { x: A2.x, y: A2.y - FASCIA, z: A2.z };

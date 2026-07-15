@@ -11,6 +11,7 @@
  */
 
 import * as THREE from 'three';
+import { levelY } from '../core/constants';
 import type { Grid } from '../grid/grid';
 import { pick, type Pick } from '../grid/picking';
 import type { History } from '../town/history';
@@ -208,7 +209,13 @@ export class InputController {
       }
       bulk.targets = this.linePath(bulk.startCell, endCell);
     } else {
-      // area: cells whose centroid projects into the dragged screen rect
+      // area: cells whose centroid projects into the dragged screen rect.
+      // Project at the GESTURE'S working plane, not the ground — at altitude
+      // a cell's ground shadow sits elsewhere on screen, so testing at y=0.3
+      // selected "the spots on the ground associated with the spots in the
+      // air" (and read as direction-dependent, since one diagonal happened
+      // to sweep the shadows anyway).
+      const planeY = levelY(bulk.level);
       const x0 = Math.min(bulk.startNdc.x, this.ndc.x);
       const x1 = Math.max(bulk.startNdc.x, this.ndc.x);
       const y0 = Math.min(bulk.startNdc.y, this.ndc.y);
@@ -216,7 +223,7 @@ export class InputController {
       const v = new THREE.Vector3();
       const targets: number[] = [];
       for (const c of this.grid.cells) {
-        v.set(c.cx, 0.3, c.cy).project(this.rig.camera);
+        v.set(c.cx, planeY, c.cy).project(this.rig.camera);
         if (v.x >= x0 && v.x <= x1 && v.y >= y0 && v.y <= y1 && v.z < 1) targets.push(c.id);
       }
       bulk.targets = targets.length > 0 ? targets : [bulk.startCell];

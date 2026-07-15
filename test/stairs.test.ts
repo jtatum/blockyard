@@ -1,12 +1,18 @@
 /**
- * Alley staircase special build — detection rules, emission safety envelope
- * (finite, budgeted, inside the gap cell), and determinism. Headless: GeoSink
- * needs no WebGL.
+ * Staircase special builds — placed-block detection rules (small switchback
+ * + large plaza stairs), emission safety envelope (finite, budgeted, inside
+ * the trigger cell), and determinism. Headless: GeoSink needs no WebGL.
  */
 
 import { describe, expect, it } from 'vitest';
 import { GeoSink } from '../src/arch/geom';
-import { detectStairs, emitStairs, stairsSignature, type StairSpec } from '../src/arch/stairs';
+import {
+  detectStairs,
+  emitLargeStairs,
+  emitStairs,
+  stairsSignature,
+  type StairSpec,
+} from '../src/arch/stairs';
 import { LAND_TOP, levelY } from '../src/core/constants';
 import { generateGrid } from '../src/grid/generate';
 import { Town, type Edit } from '../src/town/town';
@@ -32,20 +38,6 @@ function fillColumn(town: Town, cell: number, height: number): void {
   town.apply(edits);
 }
 
-/** nearest cell to a grid-plane point (deterministic; the grid is fixed) */
-function cellNear(x: number, y: number): number {
-  let best = 0;
-  let bd = Infinity;
-  for (const c of grid.cells) {
-    const d = (c.cx - x) ** 2 + (c.cy - y) ** 2;
-    if (d < bd) {
-      bd = d;
-      best = c.id;
-    }
-  }
-  return best;
-}
-
 /** same "roughly opposite" rule stairs.ts uses (dot of outward normals < −0.2) */
 function oppositeEdge(cellId: number, k: number): number {
   const c = grid.cells[cellId]!;
@@ -64,12 +56,16 @@ function oppositeEdge(cellId: number, k: number): number {
   return best;
 }
 
+const isNeighbor = (a: number, b: number): boolean =>
+  grid.cells[a]!.neighbors.includes(b);
+
 /**
- * A known qualifying site found programmatically: a land gap cell with a
- * valid opposite pair (A, B), chosen so that NO other cell is adjacent to
- * both A and B — filling only A and B then makes the gap the unique match.
+ * A known qualifying SMALL site found programmatically: a land trigger cell
+ * with a valid opposite flank pair (A, B) plus flank-extension cells (the
+ * "2 long" rule), chosen so no other cell flanks both A and B and the
+ * extensions never touch the trigger cell or the far flank.
  */
-function findSite(): { gap: number; kA: number; A: number; B: number } {
+function findSmallSite(): { gap: number; kA: number; A: number; B: number; extA: number; extB: number } {
   const town = freshTown(); // fresh island just for isLand queries
   for (const c of grid.cells) {
     if (!town.isLand(c.id)) continue;
@@ -85,48 +81,159 @@ function findSite(): { gap: number; kA: number; A: number; B: number } {
         (n) => n >= 0 && n !== c.id && nearA.has(n)
       );
       if (shared.length > 0) continue; // another cell flanks both — ambiguous
-      return { gap: c.id, kA, A, B };
+      const pickExt = (flank: number, avoid: number[]): number =>
+        grid.cells[flank]!.neighbors.find(
+          (n) =>
+            n >= 0 &&
+            town.isLand(n) &&
+            !avoid.includes(n) &&
+            !isNeighbor(n, c.id) // extensions never flank the trigger cell
+        ) ?? -1;
+      const extA = pickExt(A, [c.id, B]);
+      const extB = pickExt(B, [c.id, A, extA]);
+      if (extA < 0 || extB < 0 || isNeighbor(extA, extB)) continue;
+      return { gap: c.id, kA, A, B, extA, extB };
     }
   }
-  throw new Error('no qualifying stair site on the default grid');
+  throw new Error('no qualifying small-stair site on the default grid');
 }
 
-const SITE = findSite();
+/**
+ * A known qualifying LARGE site: a land cell whose strict-opposite pair
+ * (kL, kL+2) flanks it, with an empty front, a plaza cell behind, and a
+ * plaza-continuation cell — all land, all distinct.
+ */
+function findLargeSite(): {
+  cell: number;
+  L: number;
+  R: number;
+  front: number;
+  plaza: number;
+  plazaExt: number;
+} {
+  const town = freshTown();
+  for (const c of grid.cells) {
+    if (!town.isLand(c.id)) continue;
+    const n = c.neighbors;
+    if (n.some((x) => x < 0 || !town.isLand(x))) continue;
+    for (const kL of [0, 1]) {
+      const L = n[kL]!;
+      const R = n[kL + 2]!;
+      for (const kF of [(kL + 1) % 4, (kL + 3) % 4]) {
+        const front = n[kF]!;
+        const plaza = n[(kF + 2) % 4]!;
+        const plazaExt =
+          grid.cells[plaza]!.neighbors.find(
+            (q) =>
+              q >= 0 &&
+              q !== c.id &&
+              town.isLand(q) &&
+              q !== L &&
+              q !== R &&
+              q !== front &&
+              !isNeighbor(q, c.id) // keep the plaza extension away from the trigger
+          ) ?? -1;
+        if (plazaExt < 0) continue;
+        return { cell: c.id, L, R, front, plaza, plazaExt };
+      }
+    }
+  }
+  throw new Error('no qualifying large-stair site on the default grid');
+}
 
-describe('stairs detection', () => {
-  it('finds exactly the constructed gap with levels = min column height', () => {
+const SMALL = findSmallSite();
+const LARGE = findLargeSite();
+
+/** flanks 3 tall, both extensions 2 tall (satisfies the "2 long" rule) */
+function buildSmallFlanks(town: Town, hA = 3, hB = 3): void {
+  fillColumn(town, SMALL.A, hA);
+  fillColumn(town, SMALL.B, hB);
+  fillColumn(town, SMALL.extA, 2);
+  fillColumn(town, SMALL.extB, 2);
+}
+
+describe('small stairs detection', () => {
+  it('a placed column between long, taller flanks becomes stairs of its own height', () => {
     const town = freshTown();
-    fillColumn(town, SITE.A, 3);
-    fillColumn(town, SITE.B, 3);
+    buildSmallFlanks(town, 4, 4);
+    fillColumn(town, SMALL.gap, 1);
     const specs = detectStairs(town);
     expect(specs).toHaveLength(1);
     const spec = specs[0]!;
-    expect(spec.cell).toBe(SITE.gap);
-    expect(spec.levels).toBe(3);
-    expect(new Set([spec.cellA, spec.cellB])).toEqual(new Set([SITE.A, SITE.B]));
-    // kA is the gap's edge facing cellA
+    expect(spec.kind).toBe('small');
+    expect(spec.cell).toBe(SMALL.gap);
+    expect(spec.levels).toBe(1);
+    expect(new Set([spec.cellA, spec.cellB])).toEqual(new Set([SMALL.A, SMALL.B]));
     expect(grid.cells[spec.cell]!.neighbors[spec.kA]).toBe(spec.cellA);
+
+    // stack the trigger column and the stairs climb with it
+    town.apply([place(SMALL.gap, 1), place(SMALL.gap, 2)]);
+    const taller = detectStairs(town);
+    expect(taller).toHaveLength(1);
+    expect(taller[0]!.levels).toBe(3);
   });
 
-  it('does not fire when the gap cell itself is filled', () => {
+  it('does NOT fire on an empty gap (stairs are placed, not spawned)', () => {
     const town = freshTown();
-    fillColumn(town, SITE.A, 3);
-    fillColumn(town, SITE.B, 3);
-    town.apply([place(SITE.gap, 0)]);
+    buildSmallFlanks(town);
     expect(detectStairs(town)).toHaveLength(0);
   });
 
-  it('does not fire between a tower and a 1-storey shed (levels >= 2 rule)', () => {
+  it('does not fire when the column reaches or overtops the flanks, or floats', () => {
     const town = freshTown();
-    fillColumn(town, SITE.A, 3);
-    fillColumn(town, SITE.B, 1);
+    buildSmallFlanks(town); // min flank height 3
+    fillColumn(town, SMALL.gap, 3); // equal height = just more building
+    expect(detectStairs(town)).toHaveLength(0);
+    // non-contiguous column (floating span) is arch territory, not stairs
+    const town2 = freshTown();
+    buildSmallFlanks(town2);
+    town2.apply([place(SMALL.gap, 1)]);
+    expect(detectStairs(town2)).toHaveLength(0);
+  });
+
+  it('never eats the interior of a uniformly tall building (slab regression)', () => {
+    const town = freshTown();
+    // 2-ring blob around the small site, filled to a uniform flat slab
+    const seen = new Set<number>([SMALL.gap]);
+    let frontier = [SMALL.gap];
+    for (let r = 0; r < 2; r++) {
+      const next: number[] = [];
+      for (const ci of frontier) {
+        for (const n of grid.cells[ci]!.neighbors) {
+          if (n >= 0 && town.isLand(n) && !seen.has(n)) {
+            seen.add(n);
+            next.push(n);
+          }
+        }
+      }
+      frontier = next;
+    }
+    for (const c of seen) fillColumn(town, c, 2);
+    expect(detectStairs(town)).toHaveLength(0);
+    for (const c of seen) town.apply([place(c, 2), place(c, 3)]);
     expect(detectStairs(town)).toHaveLength(0);
   });
 
-  it('clamps levels to 5 beside very tall towers, and emits within budget there', () => {
+  it('requires flanks at least 2 tall AND 2 long', () => {
     const town = freshTown();
-    fillColumn(town, SITE.A, 9);
-    fillColumn(town, SITE.B, 7);
+    fillColumn(town, SMALL.A, 3);
+    fillColumn(town, SMALL.B, 1); // too short
+    fillColumn(town, SMALL.extA, 2);
+    fillColumn(town, SMALL.extB, 2);
+    fillColumn(town, SMALL.gap, 1);
+    expect(detectStairs(town)).toHaveLength(0);
+
+    const town2 = freshTown();
+    fillColumn(town2, SMALL.A, 3); // tall but lone towers — not "2 long"
+    fillColumn(town2, SMALL.B, 3);
+    fillColumn(town2, SMALL.gap, 1);
+    expect(detectStairs(town2)).toHaveLength(0);
+  });
+
+  it('caps at 5 storeys and stays within the emission budget there', () => {
+    const town = freshTown();
+    buildSmallFlanks(town, 9, 7);
+    fillColumn(town, SMALL.gap, 5);
     const specs = detectStairs(town);
     expect(specs).toHaveLength(1);
     expect(specs[0]!.levels).toBe(5);
@@ -134,28 +241,109 @@ describe('stairs detection', () => {
     emitStairs(sink, town, specs[0]!);
     expect(sink.pos.length / 9).toBeLessThanOrEqual(900);
     for (const v of sink.pos) expect(Number.isFinite(v)).toBe(true);
+    // a 6-tall column is a building again
+    town.apply([place(SMALL.gap, 5)]);
+    expect(detectStairs(town)).toHaveLength(0);
+  });
+});
+
+describe('large stairs detection', () => {
+  function buildLargeSite(town: Town): void {
+    fillColumn(town, LARGE.L, 2);
+    fillColumn(town, LARGE.R, 2);
+    fillColumn(town, LARGE.plaza, 1);
+    fillColumn(town, LARGE.plazaExt, 1);
+    fillColumn(town, LARGE.cell, 1);
+  }
+
+  it('a block with 2-tall flanks, plaza behind and open land in front goes monumental', () => {
+    const town = freshTown();
+    buildLargeSite(town);
+    const specs = detectStairs(town).filter((s) => s.cell === LARGE.cell);
+    expect(specs).toHaveLength(1);
+    const spec = specs[0]!;
+    expect(spec.kind).toBe('large');
+    expect(spec.levels).toBe(1);
+    expect(spec.cellA).toBe(LARGE.front);
+    expect(spec.cellB).toBe(LARGE.plaza);
+    expect(new Set([spec.flankL, spec.flankR])).toEqual(new Set([LARGE.L, LARGE.R]));
+    expect(grid.cells[spec.cell]!.neighbors[spec.kA]).toBe(LARGE.front);
+  });
+
+  it('needs the open approach and the plaza continuation', () => {
+    const town = freshTown();
+    buildLargeSite(town);
+    town.apply([place(LARGE.front, 0)]); // block the approach
+    expect(detectStairs(town).filter((s) => s.cell === LARGE.cell && s.kind === 'large')).toHaveLength(0);
+
+    const town2 = freshTown();
+    fillColumn(town2, LARGE.L, 2);
+    fillColumn(town2, LARGE.R, 2);
+    fillColumn(town2, LARGE.plaza, 1); // lone deck cell — not a plaza
+    fillColumn(town2, LARGE.cell, 1);
+    expect(detectStairs(town2).filter((s) => s.cell === LARGE.cell && s.kind === 'large')).toHaveLength(0);
+  });
+
+  it('a second storey on the plaza (now a wall) kills the match', () => {
+    const town = freshTown();
+    buildLargeSite(town);
+    town.apply([place(LARGE.plaza, 1)]);
+    expect(detectStairs(town).filter((s) => s.cell === LARGE.cell && s.kind === 'large')).toHaveLength(0);
+  });
+
+  it('emits finite, budgeted geometry inside the trigger cell footprint', () => {
+    const town = freshTown();
+    buildLargeSite(town);
+    const spec = detectStairs(town).find((s) => s.cell === LARGE.cell)!;
+    const sink = new GeoSink();
+    emitLargeStairs(sink, town, spec);
+    expect(sink.pos.length).toBeGreaterThan(0);
+    expect(sink.pos.length % 9).toBe(0);
+    expect(sink.pos.length / 9).toBeLessThanOrEqual(200);
+
+    const c = grid.cells[spec.cell]!;
+    let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
+    for (let k = 0; k < 4; k++) {
+      const v = grid.corner(c, k);
+      bx0 = Math.min(bx0, v.x);
+      bx1 = Math.max(bx1, v.x);
+      bz0 = Math.min(bz0, v.y);
+      bz1 = Math.max(bz1, v.y);
+    }
+    for (let i = 0; i < sink.pos.length; i += 3) {
+      const x = sink.pos[i]!;
+      const y = sink.pos[i + 1]!;
+      const z = sink.pos[i + 2]!;
+      expect(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)).toBe(true);
+      expect(y).toBeGreaterThanOrEqual(LAND_TOP - 0.05);
+      expect(y).toBeLessThanOrEqual(levelY(1) + 0.05);
+      expect(x).toBeGreaterThanOrEqual(bx0 - 0.05);
+      expect(x).toBeLessThanOrEqual(bx1 + 0.05);
+      expect(z).toBeGreaterThanOrEqual(bz0 - 0.05);
+      expect(z).toBeLessThanOrEqual(bz1 + 0.05);
+    }
   });
 });
 
 describe('stairs emission', () => {
   function emitSite(): { spec: StairSpec; sink: GeoSink } {
     const town = freshTown();
-    fillColumn(town, SITE.A, 3);
-    fillColumn(town, SITE.B, 3);
+    buildSmallFlanks(town, 4, 4);
+    fillColumn(town, SMALL.gap, 3);
     const spec = detectStairs(town)[0]!;
     const sink = new GeoSink();
     emitStairs(sink, town, spec);
     return { spec, sink };
   }
 
-  it('emits finite, budgeted geometry inside the gap cell footprint', () => {
+  it('emits finite, budgeted geometry inside the trigger cell footprint', () => {
     const { spec, sink } = emitSite();
     expect(sink.pos.length).toBeGreaterThan(0);
     expect(sink.pos.length % 9).toBe(0);
     expect(sink.col.length).toBe(sink.pos.length);
     expect(sink.pos.length / 9).toBeLessThanOrEqual(900); // triangle budget
 
-    // gap cell AABB (grid plane (x, y) -> three (x, z)), inflated 0.05
+    // trigger cell AABB (grid plane (x, y) -> three (x, z)), inflated 0.05
     const c = grid.cells[spec.cell]!;
     let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
     for (let k = 0; k < 4; k++) {
@@ -195,54 +383,45 @@ describe('stairs emission', () => {
   it('stairsSignature encodes every spec field and distinguishes specs', () => {
     const { spec } = emitSite();
     expect(stairsSignature(spec)).toBe(
-      `S${spec.cell},${spec.kA},${spec.cellA},${spec.cellB},${spec.levels}`
+      `S${spec.kind[0]}${spec.cell},${spec.kA},${spec.cellA},${spec.cellB},${spec.flankL},${spec.flankR},${spec.levels}`
     );
     expect(stairsSignature({ ...spec, levels: spec.levels + 1 })).not.toBe(stairsSignature(spec));
     expect(stairsSignature({ ...spec, kA: (spec.kA + 1) % 4 })).not.toBe(stairsSignature(spec));
+    expect(stairsSignature({ ...spec, kind: 'large' })).not.toBe(stairsSignature(spec));
   });
 });
 
 describe('stairs sweep', () => {
-  it('two 4-tall towers + a 3-cell row: detection total, specs valid, emission safe', () => {
+  it('a dense mixed build: detection total, specs valid, emission safe', () => {
     const town = freshTown();
-    // two separated 4-tall towers (they flank the known gap, so the sweep
-    // is guaranteed non-vacuous) ...
-    fillColumn(town, SITE.A, 4);
-    fillColumn(town, SITE.B, 4);
-    // ... plus a 3-cell row walked along adjacency
-    const row: number[] = [cellNear(-5, 3)];
-    while (row.length < 3) {
-      const cur = grid.cells[row[row.length - 1]!]!;
-      const next = cur.neighbors.find((n) => n >= 0 && !row.includes(n));
-      if (next === undefined) break;
-      row.push(next);
-    }
-    expect(row).toHaveLength(3);
-    for (const cell of row) fillColumn(town, cell, 2);
+    buildSmallFlanks(town, 4, 4);
+    fillColumn(town, SMALL.gap, 2);
+    // pile more mass around the large site too
+    fillColumn(town, LARGE.L, 2);
+    fillColumn(town, LARGE.R, 2);
+    fillColumn(town, LARGE.plaza, 1);
+    fillColumn(town, LARGE.plazaExt, 1);
+    fillColumn(town, LARGE.cell, 1);
 
     let specs: StairSpec[] = [];
     expect(() => {
       specs = detectStairs(town);
     }).not.toThrow();
-    expect(specs.length).toBeGreaterThanOrEqual(1); // at least the known gap
+    expect(specs.length).toBeGreaterThanOrEqual(1);
 
-    const seenGaps = new Set<number>();
+    const seen = new Set<number>();
     for (const s of specs) {
-      // one spec per gap cell
-      expect(seenGaps.has(s.cell)).toBe(false);
-      seenGaps.add(s.cell);
-      // gap is empty land; flanks are ground-rooted neighbors
-      expect(town.filled[s.cell]).toBe(0);
+      expect(seen.has(s.cell)).toBe(false); // one spec per trigger cell
+      seen.add(s.cell);
       expect(town.isLand(s.cell)).toBe(true);
-      expect(town.isFilled(s.cellA, 0)).toBe(true);
-      expect(town.isFilled(s.cellB, 0)).toBe(true);
-      expect(grid.cells[s.cell]!.neighbors[s.kA]).toBe(s.cellA);
-      expect(grid.cells[s.cell]!.neighbors).toContain(s.cellB);
-      expect(s.levels).toBeGreaterThanOrEqual(2);
+      expect(town.filled[s.cell]).not.toBe(0);
+      expect(s.levels).toBeGreaterThanOrEqual(1);
       expect(s.levels).toBeLessThanOrEqual(5);
-      // emission never throws and stays finite + budgeted
       const sink = new GeoSink();
-      expect(() => emitStairs(sink, town, s)).not.toThrow();
+      expect(() => {
+        if (s.kind === 'large') emitLargeStairs(sink, town, s);
+        else emitStairs(sink, town, s);
+      }).not.toThrow();
       expect(sink.pos.length / 9).toBeLessThanOrEqual(900);
       for (const v of sink.pos) expect(Number.isFinite(v)).toBe(true);
     }

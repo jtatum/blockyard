@@ -73,6 +73,12 @@ export function walkLoops(
     }
   }
   const used = new Set<string>();
+  const dirOf = (he: HalfEdge): { x: number; y: number } => {
+    const c = grid.cells[he.cell]!;
+    const a = grid.vertices[c.corners[he.k]!]!;
+    const b = grid.vertices[c.corners[(he.k + 1) % 4]!]!;
+    return { x: b.x - a.x, y: b.y - a.y };
+  };
   const loops: HalfEdge[][] = [];
   for (const e0 of edges) {
     if (used.has(e0.cell + ':' + e0.k)) continue;
@@ -84,7 +90,31 @@ export function walkLoops(
       used.add(key);
       loop.push(e);
       const endV: number = grid.cells[e.cell]!.corners[(e.k + 1) % 4]!;
-      e = (byStart.get(endV) ?? []).find((c) => !used.has(c.cell + ':' + c.k));
+      const candidates = (byStart.get(endV) ?? []).filter((c) => !used.has(c.cell + ':' + c.k));
+      if (candidates.length <= 1) {
+        e = candidates[0];
+      } else {
+        // pinch vertex — several boundary edges continue from here. Take the
+        // sharpest LEFT turn (interior stays left, loops never cross). The
+        // choice depends only on geometry, never on flood-fill discovery
+        // order, so remote edits cannot silently re-pair distant loops
+        // (determinism law: derived geometry is a pure function of state).
+        const din = dirOf(e);
+        let best: HalfEdge | undefined;
+        let bestAngle = -Infinity;
+        for (const c of candidates) {
+          const dout = dirOf(c);
+          const angle = Math.atan2(
+            din.x * dout.y - din.y * dout.x,
+            din.x * dout.x + din.y * dout.y
+          );
+          if (angle > bestAngle) {
+            bestAngle = angle;
+            best = c;
+          }
+        }
+        e = best;
+      }
     }
     if (loop.length >= 2) loops.push(loop);
   }
@@ -105,12 +135,18 @@ const SINGLE_ARC_STEPS = 4;
  * corner becomes a quadratic-bezier arc (control point = the original
  * corner) sampled into short segments. Loop-smoothed endpoint normals are
  * attached so curves also SHADE round.
+ *
+ * `sharpAt` marks corners that must stay SQUARE: a corner only rounds into
+ * free space. Where the vertex is shared with another mass (a neighboring
+ * building, an archway's span column), both surfaces would fillet away from
+ * it and open a see-through wedge — sharp corners meet flush instead.
  */
 export function smoothLoop(
   grid: Grid,
   loop: HalfEdge[],
   single: boolean,
-  cornerPoint?: Map<number, { x: number; y: number }>
+  cornerPoint?: Map<number, { x: number; y: number }>,
+  sharpAt?: (vId: number) => boolean
 ): OSeg[] {
   const n = loop.length;
   const frac = single ? SINGLE_FRAC : CUT_FRAC;
@@ -125,21 +161,32 @@ export function smoothLoop(
     return { ax: a.x, ay: a.y, bx: b.x, by: b.y, len: Math.hypot(b.x - a.x, b.y - a.y), vId: c.corners[(e.k + 1) % 4]! };
   });
 
+  // cut distance at each corner (between edge i and edge i+1); 0 = sharp
+  const cut = pts.map((cur, i) => {
+    if (sharpAt?.(cur.vId)) return 0;
+    return Math.min(cap, frac * cur.len, frac * pts[(i + 1) % n]!.len);
+  });
+
   const raw: Omit<OSeg, 'nax' | 'nay' | 'nbx' | 'nby'>[] = [];
   for (let i = 0; i < n; i++) {
     const cur = pts[i]!;
     const nxt = pts[(i + 1) % n]!;
     const eCur = loop[i]!;
     const eNxt = loop[(i + 1) % n]!;
-    // cut distances at the corner between edge i and edge i+1
-    const d = Math.min(cap, frac * cur.len, frac * nxt.len);
-    const dPrev = Math.min(cap, frac * cur.len, frac * pts[(i - 1 + n) % n]!.len);
+    const d = cut[i]!;
+    const dPrev = cut[(i - 1 + n) % n]!;
     // central straight piece of edge i (from dPrev past a, to d before b)
     const ux = (cur.bx - cur.ax) / cur.len;
     const uy = (cur.by - cur.ay) / cur.len;
     const p0 = { x: cur.ax + ux * dPrev, y: cur.ay + uy * dPrev };
     const p1 = { x: cur.bx - ux * d, y: cur.by - uy * d };
     raw.push({ ax: p0.x, ay: p0.y, bx: p1.x, by: p1.y, cell: eCur.cell, k: eCur.k, central: true });
+
+    if (d <= 1e-9) {
+      // sharp corner: no arc, the surfaces meet at the true vertex
+      cornerPoint?.set(cur.vId, { x: cur.bx, y: cur.by });
+      continue;
+    }
 
     // corner arc: quadratic bezier p1 → q0 with the original corner as control
     const vx = cur.bx;
@@ -197,14 +244,21 @@ export function smoothLoop(
   });
 }
 
-/** smoothed outlines for one level's connected filled regions */
-export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
+/** smoothed outlines for one level's connected filled regions.
+ *  `exclude` masks recipe-claimed cells (staircases) out of the wall system —
+ *  they read as unfilled, so neighbors grow boundary walls facing them. */
+export function computeOutlinesForLevel(
+  town: Town,
+  level: number,
+  exclude?: ReadonlySet<number>
+): Outline[] {
   const grid = town.grid;
   const outlines: Outline[] = [];
   const assigned = new Set<number>();
+  const filled = (c: number): boolean => town.isFilled(c, level) && !exclude?.has(c);
 
   for (const start of grid.cells) {
-    if (!town.isFilled(start.id, level) || assigned.has(start.id)) continue;
+    if (!filled(start.id) || assigned.has(start.id)) continue;
     // flood-fill the region at this level
     const cells = new Set<number>([start.id]);
     assigned.add(start.id);
@@ -212,7 +266,7 @@ export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
     while (stack.length) {
       const c = grid.cells[stack.pop()!]!;
       for (const nb of c.neighbors) {
-        if (nb < 0 || cells.has(nb) || !town.isFilled(nb, level)) continue;
+        if (nb < 0 || cells.has(nb) || !filled(nb)) continue;
         cells.add(nb);
         assigned.add(nb);
         stack.push(nb);
@@ -220,8 +274,17 @@ export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
     }
     const single = cells.size === 1;
     const cornerPoint = new Map<number, { x: number; y: number }>();
-    const loops = walkLoops(grid, (c) => town.isFilled(c, level), cells).map((loop) =>
-      smoothLoop(grid, loop, single, cornerPoint)
+    // corners round only into free space: any outside mass at this level or
+    // above (a taller neighbor, an archway's floating span) keeps them sharp
+    const sharpAt = (vId: number): boolean => {
+      for (const c of grid.vertices[vId]!.cells) {
+        if (cells.has(c) || exclude?.has(c)) continue;
+        if ((town.filled[c]! >>> level) !== 0) return true;
+      }
+      return false;
+    };
+    const loops = walkLoops(grid, filled, cells).map((loop) =>
+      smoothLoop(grid, loop, single, cornerPoint, sharpAt)
     );
     outlines.push({ level, cells, loops, single, cornerPoint });
   }
@@ -229,10 +292,10 @@ export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
 }
 
 /** all levels (full rebuilds and tests; the mesher caches per level) */
-export function computeOutlines(town: Town): Outline[] {
+export function computeOutlines(town: Town, exclude?: ReadonlySet<number>): Outline[] {
   const out: Outline[] = [];
   for (let level = 0; level < MAX_LEVELS; level++) {
-    out.push(...computeOutlinesForLevel(town, level));
+    out.push(...computeOutlinesForLevel(town, level, exclude));
   }
   return out;
 }
