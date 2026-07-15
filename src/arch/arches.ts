@@ -208,10 +208,20 @@ export function emitArch(sink: GeoSink, town: Town, spec: ArchSpec): void {
     }
   }
 
-  // ---- soffit: the span's underside in the wall's own tone ----------------
+  // ---- soffit: the span's underside in the wall's own tone, TWO-SIDED -----
   // (replaces the mesher's generic tan cap, which read as a crack above the
-  // arch where the level-above walls fillet inward past the cell footprint)
+  // arch where the level-above walls fillet inward past the cell footprint.
+  // The up-facing twin matters: from at-or-above the span line, the sliver
+  // between the spandrel top and the fillet-inset wall would otherwise show
+  // the soffit's culled back — a see-through slit over every arch crown.)
   sink.horzDown(
+    { x: a0.x, y: yTop, z: a0.y },
+    { x: a1.x, y: yTop, z: a1.y },
+    { x: b1.x, y: yTop, z: b1.y },
+    { x: b0.x, y: yTop, z: b0.y },
+    under
+  );
+  sink.horzUp(
     { x: a0.x, y: yTop, z: a0.y },
     { x: a1.x, y: yTop, z: a1.y },
     { x: b1.x, y: yTop, z: b1.y },

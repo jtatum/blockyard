@@ -383,11 +383,14 @@ function outward(p: { x: number; y: number }, c: { cx: number; cy: number }): { 
   return { x: dx / len, y: dy / len };
 }
 
-/** eave/skirt tips must not pierce neighboring masses: if extending a
+/** eave/skirt tips must not slice through neighboring masses: if extending a
  *  boundary point by `reach` lands inside a cell that is solid at this roof's
- *  level (a wall, or another roof at the same level), the overhang collapses
- *  to a hair so the roof dies flush into the mass instead of slicing it */
-const FLUSH = 0.02;
+ *  level (a wall, or another roof at the same level), the tip shortens to a
+ *  fixed TUCK. Not flush — the smoothed outlines pull back a few centimeters
+ *  at every boundary vertex, and a flush eave exposes those wedges as a
+ *  stitched seam along the junction; a short tuck hides inside the wall and
+ *  bridges them, without the old full overhang's blades at big corners. */
+const TUCK = 0.09;
 function clampReach(
   town: Town,
   level: number,
@@ -399,7 +402,10 @@ function clampReach(
 ): number {
   const cid = town.grid.cellAt(px + dirX * reach, py + dirY * reach);
   if (cid < 0) return reach;
-  if (town.isFilled(cid, level) || town.isFilled(cid, level + 1)) return FLUSH;
+  if (town.isFilled(cid, level) || town.isFilled(cid, level + 1)) {
+    const len = Math.hypot(dirX, dirY) || 1; // miter vectors carry scale
+    return Math.min(reach, TUCK / len);
+  }
   return reach;
 }
 
