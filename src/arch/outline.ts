@@ -197,14 +197,21 @@ export function smoothLoop(
   });
 }
 
-/** smoothed outlines for one level's connected filled regions */
-export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
+/** smoothed outlines for one level's connected filled regions.
+ *  `exclude` masks recipe-claimed cells (staircases) out of the wall system —
+ *  they read as unfilled, so neighbors grow boundary walls facing them. */
+export function computeOutlinesForLevel(
+  town: Town,
+  level: number,
+  exclude?: ReadonlySet<number>
+): Outline[] {
   const grid = town.grid;
   const outlines: Outline[] = [];
   const assigned = new Set<number>();
+  const filled = (c: number): boolean => town.isFilled(c, level) && !exclude?.has(c);
 
   for (const start of grid.cells) {
-    if (!town.isFilled(start.id, level) || assigned.has(start.id)) continue;
+    if (!filled(start.id) || assigned.has(start.id)) continue;
     // flood-fill the region at this level
     const cells = new Set<number>([start.id]);
     assigned.add(start.id);
@@ -212,7 +219,7 @@ export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
     while (stack.length) {
       const c = grid.cells[stack.pop()!]!;
       for (const nb of c.neighbors) {
-        if (nb < 0 || cells.has(nb) || !town.isFilled(nb, level)) continue;
+        if (nb < 0 || cells.has(nb) || !filled(nb)) continue;
         cells.add(nb);
         assigned.add(nb);
         stack.push(nb);
@@ -220,7 +227,7 @@ export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
     }
     const single = cells.size === 1;
     const cornerPoint = new Map<number, { x: number; y: number }>();
-    const loops = walkLoops(grid, (c) => town.isFilled(c, level), cells).map((loop) =>
+    const loops = walkLoops(grid, filled, cells).map((loop) =>
       smoothLoop(grid, loop, single, cornerPoint)
     );
     outlines.push({ level, cells, loops, single, cornerPoint });
@@ -229,10 +236,10 @@ export function computeOutlinesForLevel(town: Town, level: number): Outline[] {
 }
 
 /** all levels (full rebuilds and tests; the mesher caches per level) */
-export function computeOutlines(town: Town): Outline[] {
+export function computeOutlines(town: Town, exclude?: ReadonlySet<number>): Outline[] {
   const out: Outline[] = [];
   for (let level = 0; level < MAX_LEVELS; level++) {
-    out.push(...computeOutlinesForLevel(town, level));
+    out.push(...computeOutlinesForLevel(town, level, exclude));
   }
   return out;
 }

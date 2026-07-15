@@ -370,6 +370,68 @@ describe('totality fuzz gate', () => {
   const GOLDEN_GEOMETRY_HASH = 1381507880;
   const GOLDEN_STATE_HASH = 4068677882;
 
+  it('E: incremental ≡ rebuild across arch/staircase claim toggles', { timeout: 20_000 }, () => {
+    const { town, mesher } = buildTown();
+    const same = (label: string): void => {
+      const rebuilt = hashGroup(new ArchMesher(town).group);
+      expect(hashGroup(mesher.group), label).toBe(rebuilt);
+    };
+
+    // ---- large staircase site (strict-opposite flanks, plaza, open front) --
+    const site = ((): { cell: number; L: number; R: number; front: number; plaza: number; ext: number } => {
+      for (const c of grid.cells) {
+        if (!town.isLand(c.id)) continue;
+        if (c.neighbors.some((n) => n < 0 || !town.isLand(n))) continue;
+        for (const kL of [0, 1]) {
+          const L = c.neighbors[kL]!;
+          const R = c.neighbors[kL + 2]!;
+          for (const kF of [(kL + 1) % 4, (kL + 3) % 4]) {
+            const front = c.neighbors[kF]!;
+            const plaza = c.neighbors[(kF + 2) % 4]!;
+            const ext = grid.cells[plaza]!.neighbors.find(
+              (q) =>
+                q >= 0 && q !== c.id && town.isLand(q) && q !== L && q !== R && q !== front &&
+                !grid.cells[q]!.neighbors.includes(c.id)
+            );
+            if (ext !== undefined) return { cell: c.id, L, R, front, plaza, ext };
+          }
+        }
+      }
+      throw new Error('no claim-toggle site on the default grid');
+    })();
+
+    // build the surroundings, then the trigger block: claim toggles ON
+    town.apply([0, 1].map((l) => place(site.L, l, 4)));
+    town.apply([0, 1].map((l) => place(site.R, l, 5)));
+    town.apply([place(site.plaza, 0, 6), place(site.ext, 0, 6)]);
+    same('large-stair surroundings');
+    town.apply([place(site.cell, 0, 7)]);
+    expect(mesher.recipes.stairs.some((s) => s.cell === site.cell && s.kind === 'large')).toBe(true);
+    same('large stair claimed');
+
+    // a DISTANT edit kills the claim: the flank drops to one storey
+    town.apply([remove(site.L, 1)]);
+    expect(mesher.recipes.claimed.has(site.cell)).toBe(false);
+    same('claim released by distant flank edit');
+    town.apply([place(site.L, 1, 4)]);
+    expect(mesher.recipes.claimed.has(site.cell)).toBe(true);
+    same('claim restored by distant flank edit');
+
+    // ---- archway on the same flanks: span the front cell over the ground ---
+    town.apply([place(site.front, 1, 8)]); // floats between... may or may not arch
+    same('floating span placed');
+    town.apply([remove(site.front, 1)]);
+    same('floating span removed');
+
+    // ---- guaranteed arch: bridge the trigger cell axis ---------------------
+    town.apply([remove(site.cell, 0)]);
+    town.apply([place(site.cell, 1, 9)]); // L and R wall the void at level 0
+    expect(mesher.recipes.arches.has(site.cell)).toBe(true);
+    same('arch claimed');
+    town.apply([remove(site.L, 0)]); // support hollowed out — arch must react
+    same('arch support edited at distance');
+  });
+
   it('D: scripted build hashes to the golden constants (determinism law)', { timeout: 20_000 }, () => {
     const { town, mesher } = buildTown();
     const r = rng('golden');

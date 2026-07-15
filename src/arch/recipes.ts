@@ -19,6 +19,7 @@
 
 import type { Grid } from '../grid/grid';
 import type { Town } from '../town/town';
+import { archSignature, detectArches, type ArchSpec } from './arches';
 import { detectStairs, stairsSignature, type StairSpec } from './stairs';
 
 export interface LanternSpec {
@@ -45,8 +46,13 @@ export interface RecipeSet {
   buntings: BuntingSpec[];
   /** ground cells that are garden courtyard floor */
   gardens: Set<number>;
-  /** alley staircases filling gaps between buildings (spec §8) */
+  /** placed-block staircases between buildings / onto plazas (spec §8) */
   stairs: StairSpec[];
+  /** barrel-vault archways under floating spans, by cell (spec §8) */
+  arches: Map<number, ArchSpec>;
+  /** trigger cells whose columns are replaced by special geometry — the
+   *  mesher excludes these from outline and roof derivation entirely */
+  claimed: Set<number>;
 }
 
 const voxKey = (cell: number, level: number) => cell + ':' + level;
@@ -186,13 +192,18 @@ export function computeRecipes(town: Town): RecipeSet {
     buntings: [],
     gardens: new Set(),
     stairs: [],
+    arches: new Map(),
+    claimed: new Set(),
   };
   detectLighthouses(town, out);
   detectBuntings(town, out);
   detectGardens(town, out);
   out.stairs = detectStairs(town);
-  // stairs claim their gap cell; a garden never grows through a staircase
-  for (const s of out.stairs) out.gardens.delete(s.cell);
+  out.arches = detectArches(town);
+  // stair triggers are filled columns, so they never collide with gardens or
+  // buntings (both require empty columns) or arches (which require a floating
+  // span); they do claim their cell out of the wall/roof systems
+  for (const s of out.stairs) out.claimed.add(s.cell);
   return out;
 }
 
@@ -213,11 +224,20 @@ export function recipeSignature(r: RecipeSet): Map<number, string> {
   for (const c of r.gardens) add(c, 'G');
   for (const s of r.stairs) {
     // register on all cells the spec depends on: lowering a flanking tower
-    // two chunks away must rebuild the gap cell's chunk
+    // two chunks away must rebuild the trigger cell's chunk
     const ss = stairsSignature(s);
     add(s.cell, ss);
     add(s.cellA, ss);
     add(s.cellB, ss);
+    if (s.flankL >= 0) add(s.flankL, ss);
+    if (s.flankR >= 0) add(s.flankR, ss);
+  }
+  for (const a of r.arches.values()) {
+    const as = archSignature(a);
+    add(a.cell, as);
+    if (a.supportA >= 0) add(a.supportA, as);
+    if (a.supportB >= 0) add(a.supportB, as);
+    if (a.beachCell >= 0) add(a.beachCell, as); // steps live in the water cell
   }
   return sig;
 }

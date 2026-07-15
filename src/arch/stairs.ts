@@ -1,13 +1,23 @@
 /**
- * Alley staircase special build (product: the Townscaper switchback stair).
+ * Staircase special builds (product §8; Townscaper's placed-block triggers).
  *
- * An empty land cell squeezed between two ground-rooted buildings on roughly
- * opposite edges becomes a solid masonry stair tower: per storey a straight
- * 5-step flight with a landing at the turnaround end, climb direction
- * alternating each storey (switchback), low parapets along both sides, a back
- * wall at each turnaround, and closed skirts/bottom caps so the mass never
- * reads hollow. Detection is deterministic (CD4 — no random gate) and reads
- * only the gap cell's 1-ring, so the mesher's dirty contract holds. All
+ * SMALL (the switchback tower): a placed column 1..5 blocks tall squeezed
+ * between two ≥2-storey, ≥2-cell-long buildings on roughly opposite edges is
+ * re-read as a solid masonry stair tower climbing exactly the column's
+ * height: per storey a straight 5-step flight with a landing at the
+ * turnaround end, climb direction alternating each storey, low parapets, a
+ * back wall at each turnaround, and closed skirts/bottom caps so the mass
+ * never reads hollow. Stack the trigger column higher (up to the flanks) and
+ * the stairs climb with it; erase it and the alley returns.
+ *
+ * LARGE (the plaza stair): a single placed block whose strict-opposite
+ * flanks are ≥2 storeys, with a flat one-storey plaza directly behind and
+ * open walkable land in front, becomes monumental full-width steps from the
+ * ground up to the plaza deck.
+ *
+ * Detection is deterministic (CD4 — no random gate). The claimed cells are
+ * excluded from outline/roof derivation by the mesher, so flank walls and
+ * plaza eaves render around the stairs exactly as around an open gap. All
  * color jitter comes from rng(grid.seed, 'stairs', cell, storey).
  */
 
@@ -18,14 +28,23 @@ import type { Grid, GridCell } from '../grid/grid';
 import type { Town } from '../town/town';
 import type { GeoSink, P3 } from './geom';
 
+export type StairKind = 'small' | 'large';
+
 export interface StairSpec {
-  /** the empty gap cell hosting the stairs */
+  kind: StairKind;
+  /** the placed trigger cell the stairs replace */
   cell: number;
-  /** the gap cell's edge index facing cellA */
+  /** small: the cell's edge facing flank A (climb axis A→B).
+   *  large: the cell's edge facing the open approach (steps start there). */
   kA: number;
+  /** small: flank A. large: the open approach cell in front. */
   cellA: number;
+  /** small: flank B. large: the plaza cell behind. */
   cellB: number;
-  /** storeys the stair climbs (2..5) */
+  /** large only: the ≥2-storey flanking cells (-1 for small) */
+  flankL: number;
+  flankR: number;
+  /** storeys climbed (small: the trigger column height, 1..5; large: 1) */
   levels: number;
 }
 
@@ -55,37 +74,103 @@ function oppositeEdgeOf(grid: Grid, cell: GridCell, k: number): number {
   return best;
 }
 
+/** ground-rooted and at least two storeys */
+function twoTall(town: Town, c: number): boolean {
+  return c >= 0 && town.isFilled(c, 0) && town.isFilled(c, 1);
+}
+
+/** the flank belongs to a mass ≥2 cells at two storeys (Townscaper's "2 long") */
+function longFlank(town: Town, grid: Grid, flank: number, stairCell: number): boolean {
+  for (const q of grid.cells[flank]!.neighbors) {
+    if (q >= 0 && q !== stairCell && twoTall(town, q)) return true;
+  }
+  return false;
+}
+
+/** a flat one-storey deck cell that continues into at least one more deck cell */
+function plazaish(town: Town, grid: Grid, p: number, stairCell: number): boolean {
+  const deck = (c: number): boolean =>
+    c >= 0 && town.isFilled(c, 0) && !town.isFilled(c, 1);
+  if (!deck(p)) return false;
+  for (const q of grid.cells[p]!.neighbors) {
+    if (q !== stairCell && deck(q)) return true;
+  }
+  return false;
+}
+
+function matchLarge(town: Town, grid: Grid, cell: GridCell): StairSpec | null {
+  for (const kL of [0, 1]) {
+    const L = cell.neighbors[kL]!;
+    const R = cell.neighbors[kL + 2]!;
+    if (!twoTall(town, L) || !twoTall(town, R)) continue;
+    for (const kF of [(kL + 1) % 4, (kL + 3) % 4]) {
+      const kB = (kF + 2) % 4;
+      const front = cell.neighbors[kF]!;
+      const back = cell.neighbors[kB]!;
+      if (front < 0 || town.filled[front] !== 0 || !town.isLand(front)) continue;
+      if (!plazaish(town, grid, back, cell.id)) continue;
+      return {
+        kind: 'large',
+        cell: cell.id,
+        kA: kF,
+        cellA: front,
+        cellB: back,
+        flankL: L,
+        flankR: R,
+        levels: 1,
+      };
+    }
+  }
+  return null;
+}
+
+function matchSmall(town: Town, grid: Grid, cell: GridCell, h: number): StairSpec | null {
+  for (let kA = 0; kA < 4; kA++) {
+    const a = cell.neighbors[kA]!;
+    if (!twoTall(town, a)) continue;
+    const kB = oppositeEdgeOf(grid, cell, kA);
+    if (kB < 0) continue;
+    const b = cell.neighbors[kB]!;
+    if (b < 0 || b === a || !twoTall(town, b)) continue;
+    if (Math.min(town.columnHeight(a), town.columnHeight(b)) < Math.max(2, h)) continue;
+    if (!longFlank(town, grid, a, cell.id) || !longFlank(town, grid, b, cell.id)) continue;
+    return {
+      kind: 'small',
+      cell: cell.id,
+      kA,
+      cellA: a,
+      cellB: b,
+      flankL: -1,
+      flankR: -1,
+      levels: h,
+    };
+  }
+  return null;
+}
+
 /**
- * A gap cell qualifies iff it is empty, LAND, and two roughly opposite edges
- * have neighbors both filled at level 0. levels = min column height clamped
- * to 5; stairs only appear beside real masses (levels >= 2). One spec per
- * gap cell — the qualifying pair with the lowest kA wins.
+ * A trigger cell qualifies iff it is LAND and its column is contiguous from
+ * the ground, 1..5 blocks tall. Large stairs (plaza behind, opening in
+ * front, single block) take precedence over small; one spec per cell.
  */
 export function detectStairs(town: Town): StairSpec[] {
   const grid = town.grid;
   const out: StairSpec[] = [];
   for (const cell of grid.cells) {
-    if (town.filled[cell.id] !== 0) continue;
-    if (!town.isLand(cell.id)) continue;
-    for (let kA = 0; kA < 4; kA++) {
-      const a = cell.neighbors[kA]!;
-      if (a < 0 || !town.isFilled(a, 0)) continue;
-      const kB = oppositeEdgeOf(grid, cell, kA);
-      if (kB < 0) continue;
-      const b = cell.neighbors[kB]!;
-      if (b < 0 || b === a || !town.isFilled(b, 0)) continue;
-      const levels = Math.max(1, Math.min(5, Math.min(town.columnHeight(a), town.columnHeight(b))));
-      if (levels < 2) continue;
-      out.push({ cell: cell.id, kA, cellA: a, cellB: b, levels });
-      break; // lowest qualifying kA wins; one spec per gap cell
-    }
+    const mask = town.filled[cell.id]!;
+    if (mask === 0 || !town.isLand(cell.id)) continue;
+    const h = 32 - Math.clz32(mask);
+    if (h > 5 || mask !== (1 << h) - 1) continue; // contiguous ground column only
+    const spec =
+      (h === 1 ? matchLarge(town, grid, cell) : null) ?? matchSmall(town, grid, cell, h);
+    if (spec) out.push(spec);
   }
   return out;
 }
 
 /** stable dirty-diff signature (mirrors recipeSignature's value-carrying style) */
 export function stairsSignature(spec: StairSpec): string {
-  return `S${spec.cell},${spec.kA},${spec.cellA},${spec.cellB},${spec.levels}`;
+  return `S${spec.kind[0]}${spec.cell},${spec.kA},${spec.cellA},${spec.cellB},${spec.flankL},${spec.flankR},${spec.levels}`;
 }
 
 /**
@@ -302,5 +387,64 @@ export function emitStairs(sink: GeoSink, town: Town, spec: StairSpec): void {
       // (start zone belongs to the previous storey's landing below)
       botQ(fs, uHalf, -swl, swl, y0, tread);
     }
+  }
+}
+
+const LARGE_STEPS = 8;
+const LARGE_STONE = 0xbdb4a6;
+
+/**
+ * Emit the monumental plaza staircase: full-width steps climbing the trigger
+ * cell from the open approach edge (kA) up to the plaza deck at levelY(1).
+ * The tread field is a bilinear patch between the approach edge and its
+ * strict opposite, inset a hair from the side edges where the flank walls
+ * stand; per-step side skirts close the slivers the wall fillets expose.
+ */
+export function emitLargeStairs(sink: GeoSink, town: Town, spec: StairSpec): void {
+  const grid = town.grid;
+  const c = grid.cells[spec.cell];
+  if (!c) return;
+  const kF = spec.kA;
+
+  // bilinear frame: t=0 on the approach edge kF, t=1 on edge kF+2;
+  // s follows the flank side edges (s=0 tracks edge kF+3 reversed)
+  const f0 = grid.corner(c, kF);
+  const f1 = grid.corner(c, kF + 1);
+  const g0 = grid.corner(c, kF + 3);
+  const g1 = grid.corner(c, kF + 2);
+  const P = (t: number, s: number, y: number): P3 => {
+    const fx = f0.x + (f1.x - f0.x) * s;
+    const fy = f0.y + (f1.y - f0.y) * s;
+    const gx = g0.x + (g1.x - g0.x) * s;
+    const gy = g0.y + (g1.y - g0.y) * s;
+    return { x: fx + (gx - fx) * t, y, z: fy + (gy - fy) * t };
+  };
+  const sLo = 0.02;
+  const sHi = 0.98;
+
+  const r = rng(grid.seed, 'stairs', spec.cell, 'large');
+  const tread = new THREE.Color(LARGE_STONE).offsetHSL(
+    r.range(-0.01, 0.01),
+    r.range(-0.02, 0.02),
+    r.range(-0.03, 0.03)
+  );
+  const riser = tread.clone().offsetHSL(0, 0, -0.055);
+
+  const y0 = LAND_TOP;
+  const y1 = levelY(1);
+  const rise = (y1 - y0) / LARGE_STEPS;
+
+  for (let i = 0; i < LARGE_STEPS; i++) {
+    const t0 = i / LARGE_STEPS;
+    const t1 = (i + 1) / LARGE_STEPS;
+    const yLo = y0 + i * rise;
+    const yHi = y0 + (i + 1) * rise;
+    // riser at t0, facing the approach (−t)
+    sink.quad(P(t0, sLo, yLo), P(t0, sLo, yHi), P(t0, sHi, yHi), P(t0, sHi, yLo), riser);
+    // tread (up-facing)
+    sink.quad(P(t0, sLo, yHi), P(t1, sLo, yHi), P(t1, sHi, yHi), P(t0, sHi, yHi), tread);
+    // side skirts down to the ground, closing the fillet slivers
+    sink.quad(P(t0, sHi, y0), P(t0, sHi, yHi), P(t1, sHi, yHi), P(t1, sHi, y0), tread);
+    sink.quad(P(t1, sLo, y0), P(t1, sLo, yHi), P(t0, sLo, yHi), P(t0, sLo, y0), tread);
   }
 }

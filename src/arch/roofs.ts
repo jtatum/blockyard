@@ -58,13 +58,20 @@ export function roofKindOf(town: Town, cell: number, level: number): RoofKind {
   return PALETTE[town.colorAt(cell, level)]!.roof;
 }
 
-export function computeRoofRegionsForLevel(town: Town, level: number): RoofRegion[] {
+/** `exclude` masks recipe-claimed cells (staircases) out of the roof system —
+ *  they read as unfilled, so e.g. a plaza's eave line opens where stairs land. */
+export function computeRoofRegionsForLevel(
+  town: Town,
+  level: number,
+  exclude?: ReadonlySet<number>
+): RoofRegion[] {
   const grid = town.grid;
   const regions: RoofRegion[] = [];
   const assigned = new Set<number>();
+  const exposed = (c: number): boolean => isTopExposed(town, c, level) && !exclude?.has(c);
 
   for (const start of grid.cells) {
-    if (!isTopExposed(town, start.id, level) || assigned.has(start.id)) continue;
+    if (!exposed(start.id) || assigned.has(start.id)) continue;
     const kind = roofKindOf(town, start.id, level);
     const cells = new Set<number>([start.id]);
     assigned.add(start.id);
@@ -73,23 +80,23 @@ export function computeRoofRegionsForLevel(town: Town, level: number): RoofRegio
       const c = grid.cells[stack.pop()!]!;
       for (const n of c.neighbors) {
         if (n < 0 || cells.has(n)) continue;
-        if (!isTopExposed(town, n, level)) continue;
+        if (!exposed(n)) continue;
         if (roofKindOf(town, n, level) !== kind) continue;
         cells.add(n);
         assigned.add(n);
         stack.push(n);
       }
     }
-    regions.push(buildRegion(town, regions.length, level, kind, cells));
+    regions.push(buildRegion(town, regions.length, level, kind, cells, exclude));
   }
   return regions;
 }
 
 /** all levels (full rebuilds and tests; the mesher caches per level) */
-export function computeRoofRegions(town: Town): RoofRegion[] {
+export function computeRoofRegions(town: Town, exclude?: ReadonlySet<number>): RoofRegion[] {
   const out: RoofRegion[] = [];
   for (let level = 0; level < MAX_LEVELS; level++) {
-    out.push(...computeRoofRegionsForLevel(town, level));
+    out.push(...computeRoofRegionsForLevel(town, level, exclude));
   }
   return out;
 }
@@ -99,17 +106,21 @@ function buildRegion(
   id: number,
   level: number,
   kind: RoofKind,
-  cells: Set<number>
+  cells: Set<number>,
+  exclude?: ReadonlySet<number>
 ): RoofRegion {
   const grid = town.grid;
   const baseY = levelY(level + 1);
 
   // a cone tower = a region that is also isolated at its own level
-  // (no filled neighbor at this level at all, exposed or not)
+  // (no filled neighbor at this level at all, exposed or not; claimed
+  // staircase cells don't break the isolation)
   let cone = false;
   if (cells.size === 1 && kind === 'pitched') {
     const only = [...cells][0]!;
-    cone = grid.cells[only]!.neighbors.every((n) => n < 0 || !town.isFilled(n, level));
+    cone = grid.cells[only]!.neighbors.every(
+      (n) => n < 0 || !town.isFilled(n, level) || exclude?.has(n) === true
+    );
   }
 
   // multi-source Dijkstra over corners + EDGE MIDPOINTS + centroids.
@@ -370,12 +381,15 @@ function outward(p: { x: number; y: number }, c: { cx: number; cy: number }): { 
   return { x: dx / len, y: dy / len };
 }
 
-/** eaves (pitched) or parapets (flat) along the smoothed loops */
+/** eaves (pitched) or parapets (flat) along the smoothed loops.
+ *  `skipSeg` suppresses individual segments (e.g. a plaza's parapet opens
+ *  where a large staircase lands against it). */
 export function emitRoofEdges(
   sink: GeoSink,
   town: Town,
   region: RoofRegion,
-  own: (cell: number) => boolean
+  own: (cell: number) => boolean,
+  skipSeg?: (seg: OSeg) => boolean
 ): void {
   if (region.cone) return; // the cone's skirt is its eave
   const baseY = levelY(region.level + 1);
@@ -405,6 +419,7 @@ export function emitRoofEdges(
     for (let i = 0; i < n; i++) {
       const s = loop[i]!;
       if (!own(s.cell)) continue;
+      if (skipSeg?.(s)) continue;
       const ma = miter(i);
       const mb = miter((i + 1) % n);
       cTmp.setHex(PALETTE[town.colorAt(s.cell, region.level)]!.roofHex);
