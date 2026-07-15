@@ -361,10 +361,12 @@ function emitConeRoof(sink: GeoSink, town: Town, region: RoofRegion): void {
     // outward skirt with a small drop, then cone side above it
     const oa = outward(a, c);
     const ob = outward(b, c);
+    const rA = clampReach(town, region.level, a.x, a.y, oa.x, oa.y, OVERHANG * 0.8);
+    const rB = clampReach(town, region.level, b.x, b.y, ob.x, ob.y, OVERHANG * 0.8);
     const A: P3 = { x: a.x, y: baseY + 0.06, z: a.y };
     const B: P3 = { x: b.x, y: baseY + 0.06, z: b.y };
-    const A2: P3 = { x: a.x + oa.x * OVERHANG * 0.8, y: baseY - 0.04, z: a.y + oa.y * OVERHANG * 0.8 };
-    const B2: P3 = { x: b.x + ob.x * OVERHANG * 0.8, y: baseY - 0.04, z: b.y + ob.y * OVERHANG * 0.8 };
+    const A2: P3 = { x: a.x + oa.x * rA, y: baseY - 0.04, z: a.y + oa.y * rA };
+    const B2: P3 = { x: b.x + ob.x * rB, y: baseY - 0.04, z: b.y + ob.y * rB };
     sink.quad(A, B, B2, A2, cTmp);
     sink.quad(A, A2, B2, B, cTmp2); // underside
     const na = coneNormal(a);
@@ -379,6 +381,26 @@ function outward(p: { x: number; y: number }, c: { cx: number; cy: number }): { 
   let dy = p.y - c.cy;
   const len = Math.hypot(dx, dy) || 1;
   return { x: dx / len, y: dy / len };
+}
+
+/** eave/skirt tips must not pierce neighboring masses: if extending a
+ *  boundary point by `reach` lands inside a cell that is solid at this roof's
+ *  level (a wall, or another roof at the same level), the overhang collapses
+ *  to a hair so the roof dies flush into the mass instead of slicing it */
+const FLUSH = 0.02;
+function clampReach(
+  town: Town,
+  level: number,
+  px: number,
+  py: number,
+  dirX: number,
+  dirY: number,
+  reach: number
+): number {
+  const cid = town.grid.cellAt(px + dirX * reach, py + dirY * reach);
+  if (cid < 0) return reach;
+  if (town.isFilled(cid, level) || town.isFilled(cid, level + 1)) return FLUSH;
+  return reach;
 }
 
 /** eaves (pitched) or parapets (flat) along the smoothed loops.
@@ -427,10 +449,12 @@ export function emitRoofEdges(
 
       if (region.kind === 'pitched') {
         const oy = baseY - EAVE_DROP;
+        const rA = clampReach(town, region.level, s.ax, s.ay, ma.x, ma.y, OVERHANG);
+        const rB = clampReach(town, region.level, s.bx, s.by, mb.x, mb.y, OVERHANG);
         const A: P3 = { x: s.ax, y: baseY, z: s.ay };
         const B: P3 = { x: s.bx, y: baseY, z: s.by };
-        const A2: P3 = { x: s.ax + ma.x * OVERHANG, y: oy, z: s.ay + ma.y * OVERHANG };
-        const B2: P3 = { x: s.bx + mb.x * OVERHANG, y: oy, z: s.by + mb.y * OVERHANG };
+        const A2: P3 = { x: s.ax + ma.x * rA, y: oy, z: s.ay + ma.y * rA };
+        const B2: P3 = { x: s.bx + mb.x * rB, y: oy, z: s.by + mb.y * rB };
         sink.quad(A, B, B2, A2, cTmp);
         sink.quad(A, A2, B2, B, cTmp2); // underside
         const A3: P3 = { x: A2.x, y: A2.y - FASCIA, z: A2.z };

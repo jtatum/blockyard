@@ -257,9 +257,10 @@ export class ArchMesher {
             return { x: v.x, y, z: v.y };
           });
           if (level > 0 || !town.isLand(cellId)) {
-            solid.horzDown(corners[0]!, corners[1]!, corners[2]!, corners[3]!, capColor);
-            // an archway carries its span level — the vault replaces the posts
+            // an archway carries its span level — the vault emits its own
+            // wall-toned soffit, replacing the generic cap and the posts
             if (arch && level === arch.top) continue;
+            solid.horzDown(corners[0]!, corners[1]!, corners[2]!, corners[3]!, capColor);
             // posts down to the next support (block top, ground, or sea floor)
             let supportY: number;
             if (level === 0) {

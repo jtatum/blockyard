@@ -203,6 +203,17 @@ export function emitArch(sink: GeoSink, town: Town, spec: ArchSpec): void {
     }
   }
 
+  // ---- soffit: the span's underside in the wall's own tone ----------------
+  // (replaces the mesher's generic tan cap, which read as a crack above the
+  // arch where the level-above walls fillet inward past the cell footprint)
+  sink.horzDown(
+    { x: a0.x, y: yTop, z: a0.y },
+    { x: a1.x, y: yTop, z: a1.y },
+    { x: b1.x, y: yTop, z: b1.y },
+    { x: b0.x, y: yTop, z: b0.y },
+    under
+  );
+
   // ---- end closures: full width & height, facing into the bay -------------
   // (at t≈0 the face points +t: traverse s 1→0 so "right of a→b" is inward)
   sink.quad(

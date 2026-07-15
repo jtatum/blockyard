@@ -366,8 +366,10 @@ describe('totality fuzz gate', () => {
   // They change whenever grid generation, meshing, the palette, or the
   // scripted edit sequence changes — that is the point: any unintended
   // drift in derived geometry or state fails this test.
-  // (regenerated 2026-07-14: arc fillets, smooth normals, midpoint ridges)
-  const GOLDEN_GEOMETRY_HASH = 1381507880;
+  // (regenerated 2026-07-14: eave/cone-skirt overhangs now clamp flush
+  // against neighboring masses instead of piercing them — geometry only,
+  // the state hash is untouched)
+  const GOLDEN_GEOMETRY_HASH = 4077094077;
   const GOLDEN_STATE_HASH = 4068677882;
 
   it('E: incremental ≡ rebuild across arch/staircase claim toggles', { timeout: 20_000 }, () => {
