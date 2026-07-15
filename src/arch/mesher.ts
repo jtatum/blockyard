@@ -115,7 +115,19 @@ export class ArchMesher {
     const regionLevels = new Set<number>(forceRegion);
     for (const c of dirty) {
       const now = town.filled[c]!;
-      const diff = (this.prevFilled[c]! ^ now) >>> 0;
+      const prev = this.prevFilled[c]!;
+      const diff = (prev ^ now) >>> 0;
+      // sharp corners depend on "any mass at or above this level" in
+      // vertex-adjacent columns — when a column's TOP moves, that predicate
+      // flips for every level beneath it, so those levels must re-solve
+      const topPrev = 32 - Math.clz32(prev);
+      const topNow = 32 - Math.clz32(now);
+      if (topPrev !== topNow) {
+        for (let l = 0; l < Math.max(topPrev, topNow); l++) {
+          outlineLevels.add(l);
+          regionLevels.add(l);
+        }
+      }
       for (let l = 0; l < MAX_LEVELS; l++) {
         const bit = 1 << l;
         if (diff & bit) {

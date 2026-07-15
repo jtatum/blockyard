@@ -226,10 +226,18 @@ function buildRegion(
     }
   }
 
-  // smoothed boundary loops, shared with the wall system
+  // smoothed boundary loops, shared with the wall system (and the same
+  // sharp-corner rule: roofs meet neighboring masses flush, no wedges)
   const cornerPoint = new Map<number, { x: number; y: number }>();
+  const sharpAt = (vId: number): boolean => {
+    for (const c of grid.vertices[vId]!.cells) {
+      if (cells.has(c) || exclude?.has(c)) continue;
+      if ((town.filled[c]! >>> level) !== 0) return true;
+    }
+    return false;
+  };
   const loops = walkLoops(grid, (c) => cells.has(c), cells).map((loop) =>
-    smoothLoop(grid, loop, cells.size === 1, cornerPoint)
+    smoothLoop(grid, loop, cells.size === 1, cornerPoint, sharpAt)
   );
   const centralSeg = new Map<string, OSeg>();
   for (const loop of loops) {

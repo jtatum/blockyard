@@ -369,10 +369,11 @@ describe('totality fuzz gate', () => {
   // They change whenever grid generation, meshing, the palette, or the
   // scripted edit sequence changes — that is the point: any unintended
   // drift in derived geometry or state fails this test.
-  // (regenerated 2026-07-14: blocked eave tips tuck 0.09 into the neighbor
-  // instead of clamping flush — flush exposed the fillet wedges as a seam —
-  // and arch soffits are two-sided. State hash untouched.)
-  const GOLDEN_GEOMETRY_HASH = 2784221604;
+  // (regenerated 2026-07-14: boundary corners now stay SHARP wherever the
+  // vertex touches outside mass at that level or above — corners only round
+  // into free space, closing the see-through fillet wedges between abutting
+  // masses and around archways. State hash untouched.)
+  const GOLDEN_GEOMETRY_HASH = 83473002;
   const GOLDEN_STATE_HASH = 4068677882;
 
   it('E: incremental ≡ rebuild across arch/staircase claim toggles', { timeout: 20_000 }, () => {
