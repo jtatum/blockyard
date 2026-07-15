@@ -73,6 +73,12 @@ export function walkLoops(
     }
   }
   const used = new Set<string>();
+  const dirOf = (he: HalfEdge): { x: number; y: number } => {
+    const c = grid.cells[he.cell]!;
+    const a = grid.vertices[c.corners[he.k]!]!;
+    const b = grid.vertices[c.corners[(he.k + 1) % 4]!]!;
+    return { x: b.x - a.x, y: b.y - a.y };
+  };
   const loops: HalfEdge[][] = [];
   for (const e0 of edges) {
     if (used.has(e0.cell + ':' + e0.k)) continue;
@@ -84,7 +90,31 @@ export function walkLoops(
       used.add(key);
       loop.push(e);
       const endV: number = grid.cells[e.cell]!.corners[(e.k + 1) % 4]!;
-      e = (byStart.get(endV) ?? []).find((c) => !used.has(c.cell + ':' + c.k));
+      const candidates = (byStart.get(endV) ?? []).filter((c) => !used.has(c.cell + ':' + c.k));
+      if (candidates.length <= 1) {
+        e = candidates[0];
+      } else {
+        // pinch vertex — several boundary edges continue from here. Take the
+        // sharpest LEFT turn (interior stays left, loops never cross). The
+        // choice depends only on geometry, never on flood-fill discovery
+        // order, so remote edits cannot silently re-pair distant loops
+        // (determinism law: derived geometry is a pure function of state).
+        const din = dirOf(e);
+        let best: HalfEdge | undefined;
+        let bestAngle = -Infinity;
+        for (const c of candidates) {
+          const dout = dirOf(c);
+          const angle = Math.atan2(
+            din.x * dout.y - din.y * dout.x,
+            din.x * dout.x + din.y * dout.y
+          );
+          if (angle > bestAngle) {
+            bestAngle = angle;
+            best = c;
+          }
+        }
+        e = best;
+      }
     }
     if (loop.length >= 2) loops.push(loop);
   }

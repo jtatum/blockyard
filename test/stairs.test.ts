@@ -153,9 +153,9 @@ function buildSmallFlanks(town: Town, hA = 3, hB = 3): void {
 }
 
 describe('small stairs detection', () => {
-  it('a placed column between long 3-tall flanks becomes stairs of its own height', () => {
+  it('a placed column between long, taller flanks becomes stairs of its own height', () => {
     const town = freshTown();
-    buildSmallFlanks(town);
+    buildSmallFlanks(town, 4, 4);
     fillColumn(town, SMALL.gap, 1);
     const specs = detectStairs(town);
     expect(specs).toHaveLength(1);
@@ -179,16 +179,39 @@ describe('small stairs detection', () => {
     expect(detectStairs(town)).toHaveLength(0);
   });
 
-  it('does not fire when the column overtops the flanks, or floats', () => {
+  it('does not fire when the column reaches or overtops the flanks, or floats', () => {
     const town = freshTown();
     buildSmallFlanks(town); // min flank height 3
-    fillColumn(town, SMALL.gap, 4);
+    fillColumn(town, SMALL.gap, 3); // equal height = just more building
     expect(detectStairs(town)).toHaveLength(0);
     // non-contiguous column (floating span) is arch territory, not stairs
     const town2 = freshTown();
     buildSmallFlanks(town2);
     town2.apply([place(SMALL.gap, 1)]);
     expect(detectStairs(town2)).toHaveLength(0);
+  });
+
+  it('never eats the interior of a uniformly tall building (slab regression)', () => {
+    const town = freshTown();
+    // 2-ring blob around the small site, filled to a uniform flat slab
+    const seen = new Set<number>([SMALL.gap]);
+    let frontier = [SMALL.gap];
+    for (let r = 0; r < 2; r++) {
+      const next: number[] = [];
+      for (const ci of frontier) {
+        for (const n of grid.cells[ci]!.neighbors) {
+          if (n >= 0 && town.isLand(n) && !seen.has(n)) {
+            seen.add(n);
+            next.push(n);
+          }
+        }
+      }
+      frontier = next;
+    }
+    for (const c of seen) fillColumn(town, c, 2);
+    expect(detectStairs(town)).toHaveLength(0);
+    for (const c of seen) town.apply([place(c, 2), place(c, 3)]);
+    expect(detectStairs(town)).toHaveLength(0);
   });
 
   it('requires flanks at least 2 tall AND 2 long', () => {
@@ -305,7 +328,7 @@ describe('large stairs detection', () => {
 describe('stairs emission', () => {
   function emitSite(): { spec: StairSpec; sink: GeoSink } {
     const town = freshTown();
-    buildSmallFlanks(town);
+    buildSmallFlanks(town, 4, 4);
     fillColumn(town, SMALL.gap, 3);
     const spec = detectStairs(town)[0]!;
     const sink = new GeoSink();

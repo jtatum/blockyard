@@ -200,10 +200,19 @@ export function computeRecipes(town: Town): RecipeSet {
   detectGardens(town, out);
   out.stairs = detectStairs(town);
   out.arches = detectArches(town);
-  // stair triggers are filled columns, so they never collide with gardens or
-  // buntings (both require empty columns) or arches (which require a floating
-  // span); they do claim their cell out of the wall/roof systems
+  // stair triggers are filled columns, so they never collide with gardens
+  // (empty columns) or arches (floating spans); they do claim their cell out
+  // of the wall/roof systems — which also strips any bunting that anchored
+  // on the trigger column, since the wall it would hang from is not rendered
   for (const s of out.stairs) out.claimed.add(s.cell);
+  out.buntings = out.buntings.filter(
+    (b) => !out.claimed.has(b.cellA) && !out.claimed.has(b.cellB)
+  );
+  // an arch premised on a claimed stair column as its 'wall' support has no
+  // wall there in the rendered scene — that span falls back to caps + posts
+  for (const [cellId, a] of [...out.arches]) {
+    if (out.claimed.has(a.supportA) || out.claimed.has(a.supportB)) out.arches.delete(cellId);
+  }
   return out;
 }
 

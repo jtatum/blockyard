@@ -47,12 +47,17 @@ export interface ArchSpec {
 const NARC = 8; // intrados samples across the opening
 const STONE = 0xb9b0a2;
 
-/** 'wall' = solid through every void level; 'pier' = floats too (span continues) */
-function supportKind(town: Town, n: number, voidMask: number): ArchEnd | null {
+/** 'wall' = solid through every void level; 'pier' = floats too, with a span
+ *  low enough to plausibly continue this one (a block hovering far above the
+ *  void supports nothing — that end falls back to posts) */
+function supportKind(town: Town, n: number, top: number, voidMask: number): ArchEnd | null {
   if (n < 0) return null;
   const m = town.filled[n]!;
   if ((m & voidMask) === voidMask) return 'wall';
-  if (m !== 0 && (m & 1) === 0) return 'pier';
+  if (m !== 0 && (m & 1) === 0) {
+    const low = 31 - Math.clz32(m & -m);
+    if (low <= top + 1) return 'pier';
+  }
   return null;
 }
 
@@ -72,8 +77,8 @@ export function detectArches(town: Town): Map<number, ArchSpec> {
     const voidMask = (1 << top) - 1;
     let best: { kA: number; endA: ArchEnd; endB: ArchEnd; score: number } | null = null;
     for (const kA of [0, 1]) {
-      const endA = supportKind(town, cell.neighbors[kA]!, voidMask);
-      const endB = supportKind(town, cell.neighbors[kA + 2]!, voidMask);
+      const endA = supportKind(town, cell.neighbors[kA]!, top, voidMask);
+      const endB = supportKind(town, cell.neighbors[kA + 2]!, top, voidMask);
       if (!endA || !endB) continue;
       const score = (endA === 'wall' ? 2 : 1) + (endB === 'wall' ? 2 : 1);
       if (!best || score > best.score) best = { kA, endA, endB, score };
@@ -214,14 +219,25 @@ export function emitArch(sink: GeoSink, town: Town, spec: ArchSpec): void {
     under
   );
 
-  // ---- end closures: full width & height, facing into the bay -------------
-  // (at t≈0 the face points +t: traverse s 1→0 so "right of a→b" is inward)
+  // ---- end closures: full width & height, TWO-SIDED ------------------------
+  // (at t≈0 the inward face points +t: traverse s 1→0 so "right of a→b" is
+  // inward. The outward twin seals the bay when the supporting neighbor has
+  // no geometry on the shared plane — a 'pier' neighbor whose own arch faces
+  // another axis, or none at all — otherwise it hides inside the support.)
   sink.quad(
     P(tEps, 1, legFootY), P(tEps, 1, yTop), P(tEps, 0, yTop), P(tEps, 0, legFootY),
     under
   );
   sink.quad(
+    P(tEps, 0, legFootY), P(tEps, 0, yTop), P(tEps, 1, yTop), P(tEps, 1, legFootY),
+    under
+  );
+  sink.quad(
     P(1 - tEps, 0, legFootY), P(1 - tEps, 0, yTop), P(1 - tEps, 1, yTop), P(1 - tEps, 1, legFootY),
+    under
+  );
+  sink.quad(
+    P(1 - tEps, 1, legFootY), P(1 - tEps, 1, yTop), P(1 - tEps, 0, yTop), P(1 - tEps, 0, legFootY),
     under
   );
 
@@ -304,7 +320,11 @@ function emitBeachSteps(sink: GeoSink, town: Town, spec: ArchSpec): void {
   const RISE = 0.13;
   const yBottom = WATER_Y - 0.5;
   const steps = Math.ceil((LAND_TOP - (WATER_Y - 0.3)) / RISE);
-  const run = Math.min(0.26, (tMax * 0.94) / steps);
+  // the first riser starts a hair seaward of the shared edge — the terrain
+  // mesh draws its coastline skirt in exactly that plane (same facing), and
+  // coplanar twins in two meshes flicker
+  const T0 = 0.02;
+  const run = Math.min(0.26, (tMax * 0.94 - T0) / steps);
 
   const r = rng(grid.seed, 'arch', spec.cell, 'beach');
   const tread = new THREE.Color(STONE).offsetHSL(
@@ -321,7 +341,7 @@ function emitBeachSteps(sink: GeoSink, town: Town, spec: ArchSpec): void {
   });
 
   for (let i = 0; i < steps; i++) {
-    const t0 = i * run;
+    const t0 = T0 + i * run;
     const t1 = t0 + run;
     const yHi = LAND_TOP - i * RISE;
     const yLo = yHi - RISE;
@@ -333,13 +353,13 @@ function emitBeachSteps(sink: GeoSink, town: Town, spec: ArchSpec): void {
     sink.quad(Q(t1, half, yBottom), Q(t1, half, yLo), Q(t0, half, yLo), Q(t0, half, yBottom), tread);
     sink.quad(Q(t0, -half, yBottom), Q(t0, -half, yLo), Q(t1, -half, yLo), Q(t1, -half, yBottom), tread);
   }
-  const tEnd = steps * run;
+  const tEnd = T0 + steps * run;
   const yEnd = LAND_TOP - steps * RISE;
   // face at the deep end + bottom cap (both mostly underwater)
   sink.quad(Q(tEnd, -half, yBottom), Q(tEnd, -half, yEnd), Q(tEnd, half, yEnd), Q(tEnd, half, yBottom), riser);
-  sink.quad(Q(0, -half, yBottom), Q(tEnd, -half, yBottom), Q(tEnd, half, yBottom), Q(0, half, yBottom), tread);
+  sink.quad(Q(T0, -half, yBottom), Q(tEnd, -half, yBottom), Q(tEnd, half, yBottom), Q(T0, half, yBottom), tread);
   // back face against the shoreline skirt (rarely visible, seals the mass)
-  sink.quad(Q(0, half, yBottom), Q(0, half, LAND_TOP), Q(0, -half, LAND_TOP), Q(0, -half, yBottom), riser);
+  sink.quad(Q(T0, half, yBottom), Q(T0, half, LAND_TOP), Q(T0, -half, LAND_TOP), Q(T0, -half, yBottom), riser);
 }
 
 /** convex-quad containment guard used by tests (all cell edges' half-planes) */

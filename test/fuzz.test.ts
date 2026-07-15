@@ -8,7 +8,7 @@
 
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { ArchMesher } from '../src/arch/mesher';
+import { ArchMesher, glassMaterial } from '../src/arch/mesher';
 import { MAX_LEVELS } from '../src/core/constants';
 import { hashKey, rng } from '../src/core/rng';
 import { generateGrid } from '../src/grid/generate';
@@ -119,44 +119,47 @@ function maskedColors(town: Town): Uint8Array {
 const q = (x: number): number => Math.round(x * 1e4) | 0;
 
 /**
- * Group-order-independent geometry hash: geometries sorted by (vertex count,
- * then lexicographic quantized positions) so child order in the group —
- * which differs between incremental updates and a fresh rebuild — cannot
- * change the hash. hashKey folds in 4096-value chunks because spreading a
- * whole position array as arguments would blow the call stack.
+ * Emission-order-independent geometry hash: the dirty contract only promises
+ * the same TRIANGLE MULTISET as a fresh rebuild — chunk build order, loop
+ * enumeration order, and buffer order may legitimately differ (a chunk whose
+ * geometry is unchanged as a set is not rebuilt when a distant region merge
+ * would merely rotate its emission order). Each triangle is hashed in a
+ * canonical rotation (cyclic — winding is preserved, so flipped faces still
+ * change the hash) over positions + normals + colors, and the per-triangle
+ * hashes fold with an order-insensitive unsigned sum.
  */
 function hashGroup(group: THREE.Group): number {
-  const geos: Float32Array[] = [];
+  let sum = 0;
+  const vals = new Array<number>(27);
   group.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
     if (!mesh.isMesh) return;
-    geos.push(mesh.geometry.getAttribute('position')!.array as Float32Array);
+    const pos = mesh.geometry.getAttribute('position')!.array as Float32Array;
+    const nrm = mesh.geometry.getAttribute('normal')!.array as Float32Array;
+    const col = mesh.geometry.getAttribute('color')!.array as Float32Array;
+    for (let t = 0; t < pos.length; t += 9) {
+      // canonical start vertex: lexicographically smallest quantized position
+      let start = 0;
+      for (const v of [1, 2]) {
+        for (let a = 0; a < 3; a++) {
+          const d = q(pos[t + v * 3 + a]!) - q(pos[t + start * 3 + a]!);
+          if (d !== 0) {
+            if (d < 0) start = v;
+            break;
+          }
+        }
+      }
+      let w = 0;
+      for (let v = 0; v < 3; v++) {
+        const src = t + ((start + v) % 3) * 3;
+        for (let a = 0; a < 3; a++) vals[w++] = q(pos[src + a]!);
+        for (let a = 0; a < 3; a++) vals[w++] = q(nrm[src + a]!);
+        for (let a = 0; a < 3; a++) vals[w++] = q(col[src + a]!);
+      }
+      sum = (sum + hashKey(...vals)) >>> 0;
+    }
   });
-  geos.sort((a, b) => {
-    if (a.length !== b.length) return a.length - b.length;
-    for (let i = 0; i < a.length; i++) {
-      const d = q(a[i]!) - q(b[i]!);
-      if (d !== 0) return d;
-    }
-    return 0;
-  });
-  let h = hashKey('geometry');
-  let chunk: number[] = [];
-  const flush = (): void => {
-    if (chunk.length) {
-      h = hashKey(h, ...chunk);
-      chunk = [];
-    }
-  };
-  for (const arr of geos) {
-    chunk.push(arr.length);
-    for (let i = 0; i < arr.length; i++) {
-      chunk.push(q(arr[i]!));
-      if (chunk.length >= 4096) flush();
-    }
-  }
-  flush();
-  return h;
+  return sum;
 }
 
 /** hash of the full observable town state (filled + masked colors + terrain) */
@@ -366,10 +369,11 @@ describe('totality fuzz gate', () => {
   // They change whenever grid generation, meshing, the palette, or the
   // scripted edit sequence changes — that is the point: any unintended
   // drift in derived geometry or state fails this test.
-  // (regenerated 2026-07-14: eave/cone-skirt overhangs now clamp flush
-  // against neighboring masses instead of piercing them — geometry only,
-  // the state hash is untouched)
-  const GOLDEN_GEOMETRY_HASH = 4077094077;
+  // (regenerated 2026-07-14: hashGroup rewritten as an order-independent
+  // triangle-multiset hash — the dirty contract only promises set equality,
+  // not buffer order — and review fixes: strict-overtop stair rule, two-sided
+  // arch closures, tighter pier rule. State hash untouched.)
+  const GOLDEN_GEOMETRY_HASH = 3420540071;
   const GOLDEN_STATE_HASH = 4068677882;
 
   it('E: incremental ≡ rebuild across arch/staircase claim toggles', { timeout: 20_000 }, () => {
@@ -411,6 +415,29 @@ describe('totality fuzz gate', () => {
     expect(mesher.recipes.stairs.some((s) => s.cell === site.cell && s.kind === 'large')).toBe(true);
     same('large stair claimed');
 
+    // blanked walls: no window glass near the claimed cell's shared edges at
+    // ground level — a window there would be buried behind the treads
+    {
+      const c = grid.cells[site.cell]!;
+      let nearGlass = 0;
+      mesher.group.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh || mesh.material !== glassMaterial) return;
+        const arr = mesh.geometry.getAttribute('position')!.array as Float32Array;
+        for (let k = 0; k < 4; k++) {
+          const n = c.neighbors[k]!;
+          if (n < 0 || town.filled[n] === 0) continue;
+          const mid = grid.edgeMid(c, k);
+          for (let i = 0; i < arr.length; i += 3) {
+            const y = arr[i + 1]!;
+            if (y < 0.32 || y > 1.32) continue;
+            if (Math.hypot(arr[i]! - mid.x, arr[i + 2]! - mid.y) < 0.35) nearGlass++;
+          }
+        }
+      });
+      expect(nearGlass, 'window glass buried behind the large stairs').toBe(0);
+    }
+
     // a DISTANT edit kills the claim: the flank drops to one storey
     town.apply([remove(site.L, 1)]);
     expect(mesher.recipes.claimed.has(site.cell)).toBe(false);
@@ -432,6 +459,42 @@ describe('totality fuzz gate', () => {
     same('arch claimed');
     town.apply([remove(site.L, 0)]); // support hollowed out — arch must react
     same('arch support edited at distance');
+
+    // ---- multi-level SMALL-stair claim through the mesher ------------------
+    // (levels >0 of the forced outline/region refresh are otherwise never
+    // exercised: large stairs claim single-block columns only)
+    town.apply([place(site.L, 0, 4)]); // restore the hollowed support
+    town.apply([remove(site.cell, 1)]); // clear the floating span
+    town.apply([place(site.L, 2, 4), place(site.R, 2, 5)]); // flanks to three storeys
+    const extOf = (f: number, avoid: number[]): number => {
+      const found = grid.cells[f]!.neighbors.find(
+        (n) =>
+          n >= 0 &&
+          town.isLand(n) &&
+          town.filled[n] === 0 &&
+          !avoid.includes(n) &&
+          !grid.cells[n]!.neighbors.includes(site.cell)
+      );
+      if (found === undefined) throw new Error('no flank extension available for test E');
+      return found;
+    };
+    const eL = extOf(site.L, [site.cell]);
+    const eR = extOf(site.R, [site.cell, eL]);
+    town.apply([place(eL, 0, 4), place(eL, 1, 4), place(eR, 0, 5), place(eR, 1, 5)]);
+    same('small-stair surroundings');
+    town.apply([place(site.cell, 0, 7), place(site.cell, 1, 7)]); // 2-tall trigger
+    expect(
+      mesher.recipes.stairs.some(
+        (s) => s.cell === site.cell && s.kind === 'small' && s.levels === 2
+      )
+    ).toBe(true);
+    same('multi-level small stair claimed');
+    town.apply([remove(eL, 1)]); // distant: the "2 long" witness drops
+    expect(mesher.recipes.claimed.has(site.cell)).toBe(false);
+    same('multi-level claim released by distant extension edit');
+    town.apply([place(eL, 1, 4)]);
+    expect(mesher.recipes.claimed.has(site.cell)).toBe(true);
+    same('multi-level claim restored');
   });
 
   it('D: scripted build hashes to the golden constants (determinism law)', { timeout: 20_000 }, () => {

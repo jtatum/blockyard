@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { archSignature, detectArches, emitArch, insideCell, type ArchSpec } from '../src/arch/arches';
 import { GeoSink } from '../src/arch/geom';
-import { SEA_FLOOR, levelY } from '../src/core/constants';
+import { LAND_TOP, SEA_FLOOR, levelY } from '../src/core/constants';
 import { generateGrid } from '../src/grid/generate';
 import { Town, type Edit } from '../src/town/town';
 
@@ -32,17 +32,17 @@ function fillColumn(town: Town, cell: number, height: number): void {
   town.apply(edits);
 }
 
-/** a land cell whose strict-opposite pair (kA, kA+2) are both land */
+/** a land cell whose strict-opposite pair (kA, kA+2) are both land — and
+ *  whose perpendicular neighbors are land too, so no beach stairway attaches
+ *  and the emission-bounds assertions stay meaningful on any default grid */
 function findSpanSite(): { cell: number; kA: number; A: number; B: number } {
   const town = freshTown();
   for (const c of grid.cells) {
     if (!town.isLand(c.id)) continue;
+    if (c.neighbors.some((n) => n < 0 || !town.isLand(n))) continue;
     for (const kA of [0, 1]) {
       const A = c.neighbors[kA]!;
       const B = c.neighbors[kA + 2]!;
-      if (A < 0 || B < 0 || !town.isLand(A) || !town.isLand(B)) continue;
-      // keep the other axis empty of surprises: all four neighbors exist
-      if (c.neighbors.some((n) => n < 0)) continue;
       return { cell: c.id, kA, A, B };
     }
   }
@@ -129,7 +129,8 @@ describe('arch detection', () => {
     for (let k = 0; k < 4; k++) if (cB.neighbors[k] === SITE.cell) kBack = k;
     expect(kBack).toBeGreaterThanOrEqual(0);
     const far = cB.neighbors[(kBack + 2) % 4]!;
-    if (far < 0) return; // grid shape doesn't allow the chain here — vacuous
+    // loud failure, not a silent skip: this is the only 'pier' coverage
+    expect(far, 'strict chain beyond SITE.B must exist for pier coverage').toBeGreaterThanOrEqual(0);
     fillColumn(town, SITE.A, 2);
     town.apply([place(SITE.cell, 1), place(SITE.B, 1)]);
     fillColumn(town, far, 2);
@@ -140,6 +141,14 @@ describe('arch detection', () => {
     expect(s2).toBeDefined();
     expect([s1!.endA, s1!.endB].sort()).toEqual(['pier', 'wall']);
     expect([s2!.endA, s2!.endB].sort()).toEqual(['pier', 'wall']);
+  });
+
+  it("a neighbor hovering far above the void is NOT a pier (nothing supports that end)", () => {
+    const town = freshTown();
+    fillColumn(town, SITE.A, 2); // proper wall on one side
+    town.apply([place(SITE.B, 10)]); // floater 9 levels above the void
+    town.apply([place(SITE.cell, 1)]);
+    expect(detectArches(town).has(SITE.cell)).toBe(false);
   });
 
   it('beach stairway attaches when an open side faces empty water', () => {
@@ -206,7 +215,7 @@ describe('arch emission', () => {
     }
   });
 
-  it('beach steps stay inside the arch cell + water cell footprints', () => {
+  it('beach steps actually descend into the water cell, inside both footprints', () => {
     const town = freshTown();
     fillColumn(town, BEACH.A, 1);
     fillColumn(town, BEACH.B, 1);
@@ -216,12 +225,24 @@ describe('arch emission', () => {
     emitArch(sink, town, spec);
     const cArch = grid.cells[spec.cell]!;
     const cSea = grid.cells[spec.beachCell]!;
+    let seaVerts = 0;
+    let submerged = 0;
     for (let i = 0; i < sink.pos.length; i += 3) {
       const x = sink.pos[i]!;
+      const y = sink.pos[i + 1]!;
       const z = sink.pos[i + 2]!;
-      const ok = insideCell(grid, cArch, x, z, 0.02) || insideCell(grid, cSea, x, z, 0.02);
+      const inSea = insideCell(grid, cSea, x, z, 0.02);
+      const ok = insideCell(grid, cArch, x, z, 0.02) || inSea;
       expect(ok).toBe(true);
+      if (inSea && !insideCell(grid, cArch, x, z, 0.02)) {
+        seaVerts++;
+        if (y < LAND_TOP - 0.1) submerged++;
+      }
     }
+    // the steps must exist: a clipping regression that silently skips them
+    // (tMax guard, edge-normal sign) would otherwise leave this test green
+    expect(seaVerts).toBeGreaterThan(20);
+    expect(submerged).toBeGreaterThan(10);
   });
 
   it('is deterministic: two runs produce identical arrays', () => {

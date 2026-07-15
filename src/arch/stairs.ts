@@ -2,13 +2,16 @@
  * Staircase special builds (product §8; Townscaper's placed-block triggers).
  *
  * SMALL (the switchback tower): a placed column 1..5 blocks tall squeezed
- * between two ≥2-storey, ≥2-cell-long buildings on roughly opposite edges is
- * re-read as a solid masonry stair tower climbing exactly the column's
+ * between two ≥2-cell-long buildings that STRICTLY overtop it on roughly
+ * opposite edges — with at least one open non-flank side as the approach —
+ * is re-read as a solid masonry stair tower climbing exactly the column's
  * height: per storey a straight 5-step flight with a landing at the
  * turnaround end, climb direction alternating each storey, low parapets, a
  * back wall at each turnaround, and closed skirts/bottom caps so the mass
- * never reads hollow. Stack the trigger column higher (up to the flanks) and
- * the stairs climb with it; erase it and the alley returns.
+ * never reads hollow. Stack the trigger column higher (while the flanks stay
+ * taller) and the stairs climb with it; erase it and the alley returns. The
+ * strict-overtop + open-approach rules are what keep a uniformly filled
+ * building reading as a building instead of a stairwell farm.
  *
  * LARGE (the plaza stair): a single placed block whose strict-opposite
  * flanks are ≥2 storeys, with a flat one-storey plaza directly behind and
@@ -125,6 +128,13 @@ function matchLarge(town: Town, grid: Grid, cell: GridCell): StairSpec | null {
 }
 
 function matchSmall(town: Town, grid: Grid, cell: GridCell, h: number): StairSpec | null {
+  // stairs live in an alley SLOT, not inside a solid mass: at least one
+  // non-flank side must be open air (this is what keeps a uniformly-filled
+  // building's interior from being re-read as a forest of stair towers)
+  const open = (k: number): boolean => {
+    const n = cell.neighbors[k]!;
+    return n >= 0 && town.filled[n] === 0;
+  };
   for (let kA = 0; kA < 4; kA++) {
     const a = cell.neighbors[kA]!;
     if (!twoTall(town, a)) continue;
@@ -132,8 +142,15 @@ function matchSmall(town: Town, grid: Grid, cell: GridCell, h: number): StairSpe
     if (kB < 0) continue;
     const b = cell.neighbors[kB]!;
     if (b < 0 || b === a || !twoTall(town, b)) continue;
-    if (Math.min(town.columnHeight(a), town.columnHeight(b)) < Math.max(2, h)) continue;
+    // flanks must overtop the stairs ("lock them in place") — equal height
+    // is just more building, which also keeps flat slabs reading as slabs
+    if (Math.min(town.columnHeight(a), town.columnHeight(b)) < Math.max(2, h + 1)) continue;
     if (!longFlank(town, grid, a, cell.id) || !longFlank(town, grid, b, cell.id)) continue;
+    let hasApproach = false;
+    for (let k = 0; k < 4 && !hasApproach; k++) {
+      if (k !== kA && k !== kB && open(k)) hasApproach = true;
+    }
+    if (!hasApproach) continue;
     return {
       kind: 'small',
       cell: cell.id,
