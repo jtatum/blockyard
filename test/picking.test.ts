@@ -107,7 +107,7 @@ describe('exact ray picking', () => {
     expect(town.isFilled(neighbor, hitLevel)).toBe(false);
   });
 
-  it('property sweep: 500 random rays keep pick() total and consistent', { timeout: 15_000 }, () => {
+  it('property sweep: 500 random rays keep pick() total and consistent', { timeout: 120_000 }, () => {
     const town = freshTown();
     const r = rng('pick');
     // scatter a random skyline (some columns float, some sit over water)

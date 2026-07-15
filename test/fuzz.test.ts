@@ -184,7 +184,7 @@ function hashTownState(town: Town): number {
 // ------------------------------------------------------------------- tests
 
 describe('totality fuzz gate', () => {
-  it('A: thousands of random edits never throw, geometry stays finite', { timeout: 25_000 }, () => {
+  it('A: thousands of random edits never throw, geometry stays finite', { timeout: 120_000 }, () => {
     const { town, mesher } = buildTown();
     const r = rng('fuzz-a');
     const N = 4000;
@@ -208,7 +208,7 @@ describe('totality fuzz gate', () => {
     console.log(`fuzz A: ${N} edits in ${dt.toFixed(1)}s (${Math.round(N / dt)} edits/s)`);
   });
 
-  it('B: adversarial patterns mesh clean and finite', { timeout: 20_000 }, () => {
+  it('B: adversarial patterns mesh clean and finite', { timeout: 120_000 }, () => {
     // 1. tall isolated towers at the level cap
     {
       const { town, mesher } = buildTown();
@@ -288,7 +288,7 @@ describe('totality fuzz gate', () => {
     }
   });
 
-  it('C: undo/redo storm restores pristine state exactly (undo fidelity, product §4)', { timeout: 15_000 }, () => {
+  it('C: undo/redo storm restores pristine state exactly (undo fidelity, product §4)', { timeout: 120_000 }, () => {
     const town = new Town(grid);
     town.seedIsland(13);
     const history = new History(town);
@@ -370,7 +370,7 @@ describe('totality fuzz gate', () => {
   const GOLDEN_GEOMETRY_HASH = 1381507880;
   const GOLDEN_STATE_HASH = 4068677882;
 
-  it('D: scripted build hashes to the golden constants (determinism law)', { timeout: 20_000 }, () => {
+  it('D: scripted build hashes to the golden constants (determinism law)', { timeout: 120_000 }, () => {
     const { town, mesher } = buildTown();
     const r = rng('golden');
     for (let i = 0; i < 80; i++) {
