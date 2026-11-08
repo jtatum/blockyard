@@ -15,7 +15,14 @@ import { Water } from '../render/water';
 import { initChrome } from '../ui/chrome';
 import { initTimeSlider } from '../ui/timeslider';
 import { InputController } from './input';
-import { Autosave, clearAutosave, loadAutosave, shareCodeFromUrl, townToUrl } from './persistence';
+import {
+  Autosave,
+  clearAutosave,
+  dropShareCodeOnChange,
+  loadAutosave,
+  shareCodeFromUrl,
+  townToUrl,
+} from './persistence';
 
 const ISLAND_RADIUS = 13;
 
@@ -180,6 +187,7 @@ async function boot(): Promise<void> {
   });
 
   new Autosave(town); // last, so the restore itself doesn't trigger a save
+  dropShareCodeOnChange(town); // ...and a reload after an edit restores the edit
 
   // dev-only introspection for scripted testing (stripped from prod builds)
   if (import.meta.env.DEV) {

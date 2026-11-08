@@ -121,3 +121,18 @@ export function shareCodeFromUrl(): string | null {
   const m = /[#&]t=([A-Za-z0-9_-]+)/.exec(location.hash);
   return m ? m[1]! : null;
 }
+
+/**
+ * A share code in the URL wins over the autosave at boot, so once the town
+ * changes the code is stale: left in place, a reload would restore the old
+ * shared snapshot and the next edit would autosave over the newer work.
+ * Drop it on the first change after boot (or after the share button wrote
+ * it). Register alongside Autosave, after the restore, so the restore itself
+ * doesn't count as a change.
+ */
+export function dropShareCodeOnChange(town: Town): void {
+  town.onChange(() => {
+    if (shareCodeFromUrl() === null) return;
+    window.history.replaceState(null, '', location.pathname + location.search);
+  });
+}
