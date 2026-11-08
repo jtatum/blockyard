@@ -53,6 +53,7 @@ export class InputController {
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointermove', this.onPointerMove);
     window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointercancel', this.onPointerCancel);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('keydown', this.onKey);
     canvas.addEventListener('pointerleave', () => this.highlight.hide());
@@ -180,6 +181,23 @@ export class InputController {
         ]);
       }
     }
+  };
+
+  /**
+   * The browser took the pointer back (system gesture, palm rejection, an
+   * alert…) and no pointerup will follow. Abandon whatever was in flight —
+   * never commit it — and hand the camera back; otherwise a cancelled touch
+   * line/area gesture left orbit disabled and its stale targets were
+   * committed by the next unrelated tap.
+   */
+  private onPointerCancel = (): void => {
+    if (this.bulk) {
+      this.bulk = null;
+      this.rig.controls.enabled = true;
+      this.highlight.hide();
+    }
+    this.touchTap = null;
+    this.rightDown = null;
   };
 
   // -- actions ---------------------------------------------------------------
